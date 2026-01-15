@@ -171,3 +171,19 @@ sphinx_*/
 
 # Local makefile
 Makefile.local
+
+# 컴파일된 커널 모듈 및 오브젝트 파일 무시
+*.ko
+*.o
+*.mod.c
+*.mod
+modules.order
+Module.symvers
+.*.cmd
+
+# 테스트 마운트 폴더 내용물 무시 (거대 파일 방지)
+test_script/mnt/*
+!test_script/mnt/.gitkeep
+
+# 편집기 임시 파일 무시
+*.swp
