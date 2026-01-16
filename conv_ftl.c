@@ -649,6 +649,43 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	struct line *victim_line = NULL;
 
 	victim_line = pqueue_peek(lm->victim_line_pq);
+	/* 
+		victim_line은 pqueue_peek로부터 선택됨
+		참고로, pqueue는 valid page가 가장 적은 block을 내뱉어줌.
+		왜 line이지? << == super block!!
+		line은 다이 병렬처리하려고 해둔거고 각 다이마다의 특정 WL을 말함 즉, line은 WL_i의 집합
+		cost-benefit으로 가려면 hot~cold page를 구분지어야 함
+		그러려면 어떻게 해야 하지?
+		very hot구역부터 very cold구역까지 N개의 구간으로 나눔
+		그렇게 하고.. 일단 초기에 어카지? 초기에는 very hot으로 가나?
+		...이건 cost-benefit이 아니라 다른거임 쓸데없는건 아니고
+		cost-benefit 계산 공식은 u / ((1 - u) * age)
+		// u: 블럭 내 valid page들, age: 블럭 내 가장 최근 페이지 변경 발생한 시각
+		이 age를 추가해야 함
+		age는 구조체 line에 latest_modified_time로 추가하자
+		이 타임스탬프는 conv_write에서 해야 함
+		정확히는, conv_write에서 page가 변경될 때마다 해당 line(=block)에 timestamp를 갱신해주면 됨
+		그러고, 실제 (현재 시각) - (최근 변경 시각) 해주면 됨
+		일단 해야할 거는 
+		1. latest_modified_time(mtime)을 구조체에 추가하고
+		2. latest_modified_time(mtime)을 갱신(어디서? 언제?)하는 로직 추가
+		-> conv_write에서 각 페이지 별로 업데이트 일어날 때마다 해당 line에 해줘야 함
+
+		각 페이지가 어느 라인에 소속되어 있는지는 어떻게 알지?
+			=> 각 다이 별 특정 번호의 블럭을 모으면 그게 라인임
+			그러면 conv_ftl의 maptbl[]로부터 ppa를 받아내고
+			ppa에서 blk뜯어오면 그게 블럭 번호.
+			아니 애초에 conv_write에서 루프마다 ppa를 얻어내잖아?
+			그럼 그냥 ppa로부터 blk 얻어내면 되네
+		
+		특정 라인을 어떻게 찾아가지?
+			=> conv_ftl의 line_mgmt의 lines가 line의 배열임.
+			lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);로써 정의되니까...
+			참고로 이 tt_lines는 SSD 내의 total_lines를 말함
+			추가적으로, vmalloc은 "논리적으로 연속된 메모리 공간"을 할당해줌
+			kmalloc은 "물리적으로 .."임
+		결국 하면 되는건, conv_write에 이미 있는 ppa로부터 line
+	*/
 	if (!victim_line) {
 		return NULL;
 	}
@@ -991,6 +1028,9 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 		NVMEV_DEBUG("%s: got new ppa %lld, ", __func__, ppa2pgidx(conv_ftl, &ppa));
 		/* update rmap */
 		set_rmap_ent(conv_ftl, local_lpn, &ppa);
+		/* update mtime */
+		struct line *updated_line = &((conv_ftl->lm).lines[ppa.g.blk]);
+		updated_line.mtime = ktime_get_ns();
 
 		mark_page_valid(conv_ftl, &ppa);
 

@@ -24,6 +24,7 @@ struct line {
 	struct list_head entry;
 	/* position in the priority queue for victim lines */
 	size_t pos;
+	int mtime; // latest_modified_time
 };
 
 /* wp: record next write addr */
@@ -36,7 +37,7 @@ struct write_pointer {
 	uint32_t pl;
 };
 
-struct line_mgmt {
+struct line_mgmt { // management, line 관리하는 집합
 	struct line *lines;
 
 	/* free line list, we only need to maintain a list of blk numbers */
@@ -44,7 +45,7 @@ struct line_mgmt {
 	pqueue_t *victim_line_pq;
 	struct list_head full_line_list;
 
-	uint32_t tt_lines;
+	uint32_t tt_lines; // total_lines
 	uint32_t free_line_cnt;
 	uint32_t victim_line_cnt;
 	uint32_t full_line_cnt;

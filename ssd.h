@@ -61,13 +61,18 @@ enum { CELL_TYPE_LSB, CELL_TYPE_MSB, CELL_TYPE_CSB, MAX_CELL_TYPES };
 /* describe a physical page addr */
 struct ppa {
 	union {
+		/*
+			각자 다른 정보를 나타내는 게 아니라
+			한 데이터를 세 가지 방법으로 해석하는 가독성 개나 줘버린 방법임
+			ㅡㅡ...
+		*/
 		struct {
-			uint64_t pg : PAGE_BITS; // pg == 4KB
-			uint64_t blk : BLK_BITS;
-			uint64_t pl : PL_BITS;
-			uint64_t lun : LUN_BITS;
-			uint64_t ch : CH_BITS;
-			uint64_t rsv : RSB_BITS;
+			uint64_t pg : PAGE_BITS; // page == 4KB
+			uint64_t blk : BLK_BITS; // block
+			uint64_t pl : PL_BITS; // plane
+			uint64_t lun : LUN_BITS; // Logic Unit Number == Die
+			uint64_t ch : CH_BITS; // channel
+			uint64_t rsv : RSB_BITS; // reserved(padding)
 		} g;
 
 		struct {

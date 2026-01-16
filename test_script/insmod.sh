@@ -16,9 +16,9 @@ if [ "$MY_NAME" == "weicom" ]; then
     echo ">> [Desktop Mode]: Start=4G, Size=3G"
 else
 #notebook
-    START_ADDR="2G"
+    START_ADDR="4G"
     SIZE="3G"
-    echo ">> [Laptop Mode]: Start=2G, Size=3G"
+    echo ">> [Laptop Mode]: Start=4G, Size=3G"
 fi
 
 # to reload, remove existing module
