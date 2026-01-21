@@ -25,6 +25,7 @@ struct line {
 	/* position in the priority queue for victim lines */
 	size_t pos;
 	int mtime; // latest_modified_time
+	int cb_value; // will save u / ((1 - u) * mtime)
 };
 
 /* wp: record next write addr */

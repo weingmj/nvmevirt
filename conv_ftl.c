@@ -72,12 +72,20 @@ static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 
 static inline pqueue_pri_t victim_line_get_pri(void *a)
 {
+	#ifdef CB
+	return ((struct line *)a)->cb_value;
+	#else
 	return ((struct line *)a)->vpc;
+	#endif
 }
 
 static inline void victim_line_set_pri(void *a, pqueue_pri_t pri)
 {
+	#ifdef CB
+	((struct line *)a)->cb_value = pri;
+	#else
 	((struct line *)a)->vpc = pri;
+	#endif
 }
 
 static inline size_t victim_line_get_pos(void *a)
@@ -518,7 +526,14 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	/* Adjust the position of the victime line in the pq under over-writes */
 	if (line->pos) {
 		/* Note that line->vpc will be updated by this call */
+		#ifdef CB
+		int u = line->vpc;
+		uint64_t age = (ktime_get_ns() - line->mtime) / 1000000; // convert ns to ms
+		int result = u / (1 - u) * age;
+		line->vpc--;
+		#else
 		pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
+		#endif
 	} else {
 		line->vpc--;
 	}
@@ -684,7 +699,13 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 			참고로 이 tt_lines는 SSD 내의 total_lines를 말함
 			추가적으로, vmalloc은 "논리적으로 연속된 메모리 공간"을 할당해줌
 			kmalloc은 "물리적으로 .."임
-		결국 하면 되는건, conv_write에 이미 있는 ppa로부터 line
+		결국 하면 되는건, conv_write에 이미 있는 ppa로부터 line 접근해서
+		그거 mtime 변경하면 됨
+		----
+		mtime은 갱신되도록 했음
+		그럼 이제 뭘 해야하냐
+		pqueue 우선순위 결정하는 곳이 어디인지 알아야 할 듯
+
 	*/
 	if (!victim_line) {
 		return NULL;
@@ -1030,7 +1051,7 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 		set_rmap_ent(conv_ftl, local_lpn, &ppa);
 		/* update mtime */
 		struct line *updated_line = &((conv_ftl->lm).lines[ppa.g.blk]);
-		updated_line.mtime = ktime_get_ns();
+		updated_line->mtime = ktime_get_ns();
 
 		mark_page_valid(conv_ftl, &ppa);
 
