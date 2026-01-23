@@ -1040,6 +1040,9 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 			mark_page_invalid(conv_ftl, &ppa);
 			set_rmap_ent(conv_ftl, INVALID_LPN, &ppa);
 			NVMEV_DEBUG("%s: %lld is invalid, ", __func__, ppa2pgidx(conv_ftl, &ppa));
+			/* update mtime */
+			struct line *updated_line = &((conv_ftl->lm).lines[ppa.g.blk]);
+			updated_line->mtime = ktime_get_ns();
 		}
 
 		/* new write */
@@ -1049,9 +1052,7 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 		NVMEV_DEBUG("%s: got new ppa %lld, ", __func__, ppa2pgidx(conv_ftl, &ppa));
 		/* update rmap */
 		set_rmap_ent(conv_ftl, local_lpn, &ppa);
-		/* update mtime */
-		struct line *updated_line = &((conv_ftl->lm).lines[ppa.g.blk]);
-		updated_line->mtime = ktime_get_ns();
+
 
 		mark_page_valid(conv_ftl, &ppa);
 
