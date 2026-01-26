@@ -7,6 +7,14 @@ include Makefile.local
 default:
 		$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
 
+.PHONY: rd
+rd:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) EXTRA_CFLAGS="-DRD" modules
+
+.PHONY: cb
+cb:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) EXTRA_CFLAGS="-DCB" modules
+
 install:
 		$(MAKE) INSTALL_MOD_PATH="$(INSTALL_MOD_PATH)" -C $(KERNELDIR) modules_install
 

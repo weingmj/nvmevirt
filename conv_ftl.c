@@ -4,8 +4,13 @@
 #include <linux/ktime.h>
 #include <linux/sched/clock.h>
 
+#ifdef RD
+#include <linux/random.h>
+#endif
+
 #include "nvmev.h"
 #include "conv_ftl.h"
+
 
 static inline bool last_pg_in_wordline(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
@@ -72,20 +77,12 @@ static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 
 static inline pqueue_pri_t victim_line_get_pri(void *a)
 {
-	#ifdef CB
-	return ((struct line *)a)->cb_value;
-	#else
 	return ((struct line *)a)->vpc;
-	#endif
 }
 
 static inline void victim_line_set_pri(void *a, pqueue_pri_t pri)
 {
-	#ifdef CB
-	((struct line *)a)->cb_value = pri;
-	#else
 	((struct line *)a)->vpc = pri;
-	#endif
 }
 
 static inline size_t victim_line_get_pos(void *a)
@@ -526,14 +523,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	/* Adjust the position of the victime line in the pq under over-writes */
 	if (line->pos) {
 		/* Note that line->vpc will be updated by this call */
-		#ifdef CB
-		int u = line->vpc;
-		uint64_t age = (ktime_get_ns() - line->mtime) / 1000000; // convert ns to ms
-		int result = u / (1 - u) * age;
-		line->vpc--;
-		#else
 		pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
-		#endif
 	} else {
 		line->vpc--;
 	}
@@ -657,65 +647,62 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	return 0;
 }
 
+#define SCALER 1000000000000LL
+static inline long long int calculate_cost_benefit_val(struct ssdparams *spp, const struct line *cur_line) {
+	long long int age = (ktime_get_ns() - cur_line->mtime) / 1000; // us
+	int vpc = cur_line->vpc;
+	int ppl = spp->pgs_per_line;
+	if (vpc == ppl || age == 0) {
+		return SCALER * 10; // 분모 0 예외 처리, 의도된 건 분모가 매우 작은 값이니 매우 큰 값을 리턴해야 함
+	}
+	return vpc * SCALER / ((ppl - vpc) * age);
+}
+
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
 	struct line *victim_line = NULL;
+#ifdef CB // cost-benefit
+	// conv_ftl 아래 ssd 아래 sp(ssdparams)으로 라인 수 얻어짐
+	int line_per_ssd = conv_ftl->ssd->sp.tt_lines, min_idx = line_per_ssd;
+	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
+	struct line *temp_line;
 
+	for (int line_idx = 0; line_idx < line_per_ssd; line_idx++) {
+		if ((cur_cbval = calculate_cost_benefit_val(spp, &lm->lines[line_idx])) < cb_min) {
+			cb_min = cur_cbval;
+			min_idx = line_idx;
+		}
+	}
+
+	if (min_idx == line_per_ssd) {
+		return NULL; // 로직에 문제가 있음
+	}
+
+	victim_line = &lm->lines[min_idx];
+#elif defined(RD)
+	int line_per_ssd = conv_ftl->ssd->sp.tt_lines;
+	int rand_val = get_random_u32() % line_per_ssd;
+	victim_line = &lm->lines[rand_val];
+#else // default, greedy
 	victim_line = pqueue_peek(lm->victim_line_pq);
-	/* 
-		victim_line은 pqueue_peek로부터 선택됨
-		참고로, pqueue는 valid page가 가장 적은 block을 내뱉어줌.
-		왜 line이지? << == super block!!
-		line은 다이 병렬처리하려고 해둔거고 각 다이마다의 특정 WL을 말함 즉, line은 WL_i의 집합
-		cost-benefit으로 가려면 hot~cold page를 구분지어야 함
-		그러려면 어떻게 해야 하지?
-		very hot구역부터 very cold구역까지 N개의 구간으로 나눔
-		그렇게 하고.. 일단 초기에 어카지? 초기에는 very hot으로 가나?
-		...이건 cost-benefit이 아니라 다른거임 쓸데없는건 아니고
-		cost-benefit 계산 공식은 u / ((1 - u) * age)
-		// u: 블럭 내 valid page들, age: 블럭 내 가장 최근 페이지 변경 발생한 시각
-		이 age를 추가해야 함
-		age는 구조체 line에 latest_modified_time로 추가하자
-		이 타임스탬프는 conv_write에서 해야 함
-		정확히는, conv_write에서 page가 변경될 때마다 해당 line(=block)에 timestamp를 갱신해주면 됨
-		그러고, 실제 (현재 시각) - (최근 변경 시각) 해주면 됨
-		일단 해야할 거는 
-		1. latest_modified_time(mtime)을 구조체에 추가하고
-		2. latest_modified_time(mtime)을 갱신(어디서? 언제?)하는 로직 추가
-		-> conv_write에서 각 페이지 별로 업데이트 일어날 때마다 해당 line에 해줘야 함
-
-		각 페이지가 어느 라인에 소속되어 있는지는 어떻게 알지?
-			=> 각 다이 별 특정 번호의 블럭을 모으면 그게 라인임
-			그러면 conv_ftl의 maptbl[]로부터 ppa를 받아내고
-			ppa에서 blk뜯어오면 그게 블럭 번호.
-			아니 애초에 conv_write에서 루프마다 ppa를 얻어내잖아?
-			그럼 그냥 ppa로부터 blk 얻어내면 되네
-		
-		특정 라인을 어떻게 찾아가지?
-			=> conv_ftl의 line_mgmt의 lines가 line의 배열임.
-			lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);로써 정의되니까...
-			참고로 이 tt_lines는 SSD 내의 total_lines를 말함
-			추가적으로, vmalloc은 "논리적으로 연속된 메모리 공간"을 할당해줌
-			kmalloc은 "물리적으로 .."임
-		결국 하면 되는건, conv_write에 이미 있는 ppa로부터 line 접근해서
-		그거 mtime 변경하면 됨
-		----
-		mtime은 갱신되도록 했음
-		그럼 이제 뭘 해야하냐
-		pqueue 우선순위 결정하는 곳이 어디인지 알아야 할 듯
-
-	*/
+#endif	
 	if (!victim_line) {
 		return NULL;
 	}
 
 	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
+		// force는 강제로 시키는거같고
+		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 내비둬라 그런건듯
 		return NULL;
 	}
 
+#if defined(CB) || defined(RD)
+	pqueue_remove(lm->victim_line_pq, victim_line);
+#else
 	pqueue_pop(lm->victim_line_pq);
+#endif
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
 
