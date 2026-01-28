@@ -615,6 +615,7 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	set_rmap_ent(conv_ftl, lpn, &new_ppa);
 
 	mark_page_valid(conv_ftl, &new_ppa);
+	conv_ftl->copy_cnt++;
 
 	/* need to advance the write pointer here */
 	advance_write_pointer(conv_ftl, GC_IO);
@@ -634,6 +635,7 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 
 		ssd_advance_nand(conv_ftl->ssd, &gcw);
 	}
+	
 
 	/* advance per-ch gc_endtime as well */
 #if 0
@@ -647,7 +649,7 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	return 0;
 }
 
-#define SCALER 1000000000000LL
+#define SCALER 1000000000000LL // 1조
 static inline long long int calculate_cost_benefit_val(struct ssdparams *spp, const struct line *cur_line) {
 	long long int age = (ktime_get_ns() - cur_line->mtime) / 1000; // us
 	int vpc = cur_line->vpc;
@@ -663,11 +665,10 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
 	struct line *victim_line = NULL;
-#ifdef CB // cost-benefit
+#if defined(CB) // cost-benefit
 	// conv_ftl 아래 ssd 아래 sp(ssdparams)으로 라인 수 얻어짐
 	int line_per_ssd = conv_ftl->ssd->sp.tt_lines, min_idx = line_per_ssd;
 	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
-	struct line *temp_line;
 
 	for (int line_idx = 0; line_idx < line_per_ssd; line_idx++) {
 		if ((cur_cbval = calculate_cost_benefit_val(spp, &lm->lines[line_idx])) < cb_min) {
@@ -681,20 +682,31 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	}
 
 	victim_line = &lm->lines[min_idx];
-#elif defined(RD)
+#elif defined(CB_ADVANCED) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
+	int min_idx = lm->victim_line_pq->size + 1;
+	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
+	for (int i = 1; i <= lm->victim_line_pq->size; i++) {
+		if ((cur_cbval = calculate_cost_benefit_val(spp, (struct line *) (lm->victim_line_pq->d)[i])) < cb_min) {
+			cb_min = cur_cbval;
+			min_idx = i;
+		}
+	}
+	if (min_idx == lm->victim_line_pq->size + 1)
+		return NULL;
+#elif defined(RD) // random
 	int line_per_ssd = conv_ftl->ssd->sp.tt_lines;
-	int rand_val = get_random_u32() % line_per_ssd;
-	victim_line = &lm->lines[rand_val];
+	int rand_idx = get_random_u32() % line_per_ssd;
+	victim_line = &lm->lines[rand_idx];
 #else // default, greedy
 	victim_line = pqueue_peek(lm->victim_line_pq);
-#endif	
+#endif
 	if (!victim_line) {
 		return NULL;
 	}
 
 	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
 		// force는 강제로 시키는거같고
-		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 내비둬라 그런건듯
+		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 놔둬라
 		return NULL;
 	}
 
@@ -748,8 +760,11 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		pg_iter = get_pg(conv_ftl->ssd, &ppa_copy);
 		/* there shouldn't be any free page in victim blocks */
 		NVMEV_ASSERT(pg_iter->status != PG_FREE);
-		if (pg_iter->status == PG_VALID)
+		if (pg_iter->status == PG_VALID) {
+			printk(KERN_ERR "DEBUG: Valid Page Found! Block: %d, Page: %d\n", ppa->g.blk, ppa->g.pg);
 			cnt++;
+			conv_ftl->copy_cnt++;
+		}
 
 		ppa_copy.g.pg++;
 	}
@@ -803,6 +818,7 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 	int flashpg;
 
 	victim_line = select_victim_line(conv_ftl, force);
+	conv_ftl->gc_cnt++;
 	if (!victim_line) {
 		return -1;
 	}
@@ -817,7 +833,6 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 	/* copy back valid data */
 	for (flashpg = 0; flashpg < spp->flashpgs_per_blk; flashpg++) {
 		int ch, lun;
-
 		ppa.g.pg = flashpg * spp->pgs_per_flashpg;
 		for (ch = 0; ch < spp->nchs; ch++) {
 			for (lun = 0; lun < spp->luns_per_ch; lun++) {
@@ -1086,7 +1101,12 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 	}
 
 	NVMEV_DEBUG_VERBOSE("%s: latency=%llu\n", __func__, latest - start);
-
+	uint64_t gc_cnts = 0, copy_cnts = 0;
+	for (i = 0; i < ns->nr_parts; i++) {
+		gc_cnts += conv_ftls[i].gc_cnt;
+		copy_cnts += conv_ftls[i].copy_cnt;
+	}
+	NVMEV_INFO("total gc: %llu, total copy: %llu", gc_cnts, copy_cnts);
 	ret->status = NVME_SC_SUCCESS;
 	ret->nsecs_target = latest;
 	return;

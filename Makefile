@@ -15,6 +15,10 @@ rd:
 cb:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) EXTRA_CFLAGS="-DCB" modules
 
+.PHONY: cb_advanced
+cb_advanced:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) EXTRA_CFLAGS="-DCB_ADVANCED" modules
+
 install:
 		$(MAKE) INSTALL_MOD_PATH="$(INSTALL_MOD_PATH)" -C $(KERNELDIR) modules_install
 
