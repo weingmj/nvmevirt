@@ -34,7 +34,7 @@ sudo insmod ./nvmev.ko memmap_start=$START_ADDR memmap_size=$SIZE cpus=1,2
 # result
 if [ $? -eq 0 ]; then
     echo "Success"
-    dmesg | tail -n 2
+    sudo dmesg | tail -n 2
 else
     echo "Failed"
 fi

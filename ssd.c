@@ -158,6 +158,17 @@ void ssd_init_params(struct ssdparams *spp, uint64_t capacity, uint32_t nparts)
 	spp->tt_lines = spp->blks_per_lun;
 	/* TODO: to fix under multiplanes */ // lun size is super-block(line) size
 
+	/* wei edited - for SLC cache */
+	spp->pg_4kb_rd_lat_slc;
+	spp->pg_rd_lat_slc;
+	spp->pg_wr_lat_slc;
+	spp->blk_er_lat_slc;
+
+	spp->oneshotpgs_per_blk_slc;
+	spp->pgs_per_oneshotpg_slc;
+	spp->pgs_per_blk_slc;
+	spp->pgs_per_line_slc;
+	
 	check_params(spp);
 
 	total_size = (unsigned long)spp->tt_luns * spp->blks_per_lun * spp->pgs_per_blk *

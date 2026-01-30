@@ -96,8 +96,8 @@ static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
 #define NAND_ERASE_LATENCY (0)
 
 #define SLC_PORTION (10) // SLC cache 10%
-#define SLC_BLKS (BLKS_PER_PLN * SLC_PORTION / 100)
-#define SLC_ONESHOT_PAGE_SIZE KB(16) // 왜 16이 아니지?? wei_edit
+#define SLC_BLKS ((BLKS_PER_PLN * SLC_PORTION) / 100)
+#define SLC_ONESHOT_PAGE_SIZE KB(16) // 왜 16이 아니지?? 원래 32, wei_edit
 #define NAND_4KB_READ_LATENCY_SLC (16254)
 #define NAND_READ_LATENCY_SLC (16369)
 #define NAND_PROG_LATENCY_SLC (40547)

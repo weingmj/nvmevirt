@@ -28,6 +28,16 @@ static inline bool should_gc_high(struct conv_ftl *conv_ftl)
 	return conv_ftl->lm.free_line_cnt <= conv_ftl->cp.gc_thres_lines_high;
 }
 
+static bool should_migration(struct conv_ftl *conv_ftl)
+{
+	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.gc_thres_lines);
+}
+
+static bool should_migration_high(struct conv_ftl *conv_ftl)
+{
+	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.gc_thres_lines_high);
+}
+
 static inline struct ppa get_maptbl_ent(struct conv_ftl *conv_ftl, uint64_t lpn)
 {
 	return conv_ftl->maptbl[lpn];
@@ -116,24 +126,36 @@ static void init_lines(struct conv_ftl *conv_ftl)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *slm = &conv_ftl->slm;
 	struct line *line;
 	int i;
-
-	lm->tt_lines = spp->blks_per_pl;
-	NVMEV_ASSERT(lm->tt_lines == spp->tt_lines);
+	/* init lm and slm */
+	slm->tt_lines = spp->tt_lines * SLC_PORTION / 100;
+	lm->tt_lines = spp->tt_lines - slm->tt_lines;
+	
+	NVMEV_ASSERT(lm->tt_lines + slm->tt_lines == spp->tt_lines);
 	lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
+	slm->lines = vmalloc(sizeof(struct line) * slm->tt_lines);
 
 	INIT_LIST_HEAD(&lm->free_line_list);
 	INIT_LIST_HEAD(&lm->full_line_list);
 
-	lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+	INIT_LIST_HEAD(&slm->free_line_list);
+	INIT_LIST_HEAD(&slm->full_line_list);
+
+	lm->victim_line_pq = pqueue_init(lm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+					 victim_line_set_pri, victim_line_get_pos,
+					 victim_line_set_pos);
+
+	slm->victim_line_pq = pqueue_init(slm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
 					 victim_line_set_pri, victim_line_get_pos,
 					 victim_line_set_pos);
 
 	lm->free_line_cnt = 0;
+	slm->free_line_cnt = 0;
 	for (i = 0; i < lm->tt_lines; i++) {
 		lm->lines[i] = (struct line){
-			.id = i,
+			.id = i + slm->tt_lines,
 			.ipc = 0,
 			.vpc = 0,
 			.pos = 0,
@@ -146,14 +168,36 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	}
 
 	NVMEV_ASSERT(lm->free_line_cnt == lm->tt_lines);
+
+	for (i = 0; i < slm->tt_lines; i++) {
+		slm->lines[i] = (struct line){
+			.id = i,
+			.ipc = 0,
+			.vpc = 0,
+			.pos = 0,
+			.entry = LIST_HEAD_INIT(slm->lines[i].entry),
+		};
+
+		/* initialize all the lines as free lines */
+		list_add_tail(&slm->lines[i].entry, &slm->free_line_list);
+		slm->free_line_cnt++;
+	}
+
+	NVMEV_ASSERT(slm->free_line_cnt == slm->tt_lines);
+
 	lm->victim_line_cnt = 0;
 	lm->full_line_cnt = 0;
+
+	slm->victim_line_cnt = 0;
+	slm->full_line_cnt = 0;
 }
 
 static void remove_lines(struct conv_ftl *conv_ftl)
 {
 	pqueue_free(conv_ftl->lm.victim_line_pq);
+	pqueue_free(conv_ftl->slm.victim_line_pq);
 	vfree(conv_ftl->lm.lines);
+	vfree(conv_ftl->slm.lines);
 }
 
 static void init_write_flow_control(struct conv_ftl *conv_ftl)
@@ -186,10 +230,28 @@ static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 	return curline;
 }
 
+static struct line *get_next_free_line_slm(struct conv_ftl *conv_ftl)
+{
+	struct line_mgmt *slm = &conv_ftl->slm;
+	struct line *curline = list_first_entry_or_null(&slm->free_line_list, struct line, entry);
+
+	if (!curline) {
+		NVMEV_ERROR("No free line left in VIRT(slm) !!!!\n");
+		return NULL;
+	}
+
+	list_del_init(&curline->entry);
+	slm->free_line_cnt--;
+	NVMEV_DEBUG("%s: free_line_cnt %d\n", __func__, slm->free_line_cnt);
+	return curline;
+}
+
 static struct write_pointer *__get_wp(struct conv_ftl *ftl, uint32_t io_type)
 {
 	if (io_type == USER_IO) {
 		return &ftl->wp;
+	} else if (io_type == MIG_IO) {
+		return &ftl->mig_wp;
 	} else if (io_type == GC_IO) {
 		return &ftl->gc_wp;
 	}
@@ -201,8 +263,12 @@ static struct write_pointer *__get_wp(struct conv_ftl *ftl, uint32_t io_type)
 static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 {
 	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
-	struct line *curline = get_next_free_line(conv_ftl);
-
+	struct line *curline;
+	if (io_type == USER_IO) {
+		curline = get_next_free_line_slm(conv_ftl);
+	} else if (io_type == MIG_IO || io_type == GC_IO) {
+		curline = get_next_free_line(conv_ftl);
+	}
 	NVMEV_ASSERT(wp);
 	NVMEV_ASSERT(curline);
 
@@ -486,7 +552,12 @@ static inline bool mapped_ppa(struct ppa *ppa)
 
 static inline struct line *get_line(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
-	return &(conv_ftl->lm.lines[ppa->g.blk]);
+	int boundary_line = conv_ftl->slm.tt_lines;
+	if (ppa->g.blk < boundary_line) {
+		return &(conv_ftl->slm.lines[ppa->g.blk]);
+	} else {
+		return &(conv_ftl->lm.lines[ppa->g.blk - boundary_line]);
+	}
 }
 
 /* update SSD status about one page from PG_VALID -> PG_VALID */
@@ -616,7 +687,6 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 
 	mark_page_valid(conv_ftl, &new_ppa);
 	conv_ftl->copy_cnt++;
-
 	/* need to advance the write pointer here */
 	advance_write_pointer(conv_ftl, GC_IO);
 
@@ -665,58 +735,96 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
 	struct line *victim_line = NULL;
-#if defined(CB) // cost-benefit
-	// conv_ftl 아래 ssd 아래 sp(ssdparams)으로 라인 수 얻어짐
-	int line_per_ssd = conv_ftl->ssd->sp.tt_lines, min_idx = line_per_ssd;
+#if defined(CB_ADVANCED) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
+	int min_idx = -1;
 	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
-
-	for (int line_idx = 0; line_idx < line_per_ssd; line_idx++) {
-		if ((cur_cbval = calculate_cost_benefit_val(spp, &lm->lines[line_idx])) < cb_min) {
-			cb_min = cur_cbval;
-			min_idx = line_idx;
-		}
-	}
-
-	if (min_idx == line_per_ssd) {
-		return NULL; // 로직에 문제가 있음
-	}
-
-	victim_line = &lm->lines[min_idx];
-#elif defined(CB_ADVANCED) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
-	int min_idx = lm->victim_line_pq->size + 1;
-	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
-	for (int i = 1; i <= lm->victim_line_pq->size; i++) {
-		if ((cur_cbval = calculate_cost_benefit_val(spp, (struct line *) (lm->victim_line_pq->d)[i])) < cb_min) {
+	for (int i = 1; i < lm->victim_line_pq->size; i++) {
+		struct line *cur_line = (struct line *) (lm->victim_line_pq->d)[i];
+		if (cur_line->ipc == 0)
+			continue;
+		if ((cur_cbval = calculate_cost_benefit_val(spp, cur_line)) < cb_min) {
 			cb_min = cur_cbval;
 			min_idx = i;
 		}
 	}
-	if (min_idx == lm->victim_line_pq->size + 1)
+	if (min_idx == -1)
 		return NULL;
+	victim_line = (struct line *) (lm->victim_line_pq->d)[min_idx];
 #elif defined(RD) // random
-	int line_per_ssd = conv_ftl->ssd->sp.tt_lines;
-	int rand_idx = get_random_u32() % line_per_ssd;
-	victim_line = &lm->lines[rand_idx];
+	int q_size = lm->victim_line_pq->size - 1;
+	int rand_idx = get_random_u32() % q_size + 1;
+	victim_line = (struct line *)lm->victim_line_pq->d[rand_idx];
 #else // default, greedy
 	victim_line = pqueue_peek(lm->victim_line_pq);
 #endif
 	if (!victim_line) {
 		return NULL;
 	}
-
+#if defined(RD)
+#else
 	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
 		// force는 강제로 시키는거같고
 		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 놔둬라
 		return NULL;
 	}
-
-#if defined(CB) || defined(RD)
+#endif
+#if defined(CB) || defined(RD) || defined(CB_ADVANCED)
 	pqueue_remove(lm->victim_line_pq, victim_line);
 #else
 	pqueue_pop(lm->victim_line_pq);
 #endif
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
+
+	/* victim_line is a danggling node now */
+	return victim_line;
+}
+
+static struct line *select_victim_line_mig(struct conv_ftl *conv_ftl, bool force)
+{
+	struct ssdparams *spp = &conv_ftl->ssd->sp;
+	struct line_mgmt *slm = &conv_ftl->slm;
+	struct line *victim_line = NULL;
+#if defined(CB_ADVANCED2) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
+	int min_idx = -1;
+	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
+	for (int i = 1; i < slm->victim_line_pq->size; i++) {
+		struct line *cur_line = (struct line *) (slm->victim_line_pq->d)[i];
+		if (cur_line->ipc == 0)
+			continue;
+		if ((cur_cbval = calculate_cost_benefit_val(spp, cur_line)) < cb_min) {
+			cb_min = cur_cbval;
+			min_idx = i;
+		}
+	}
+	if (min_idx == -1)
+		return NULL;
+	victim_line = (struct line *) (slm->victim_line_pq->d)[min_idx];
+#elif defined(RD2) // random
+	int q_size = slm->victim_line_pq->size - 1;
+	int rand_idx = get_random_u32() % q_size + 1;
+	victim_line = (struct line *)slm->victim_line_pq->d[rand_idx];
+#else // default, greedy
+	victim_line = pqueue_peek(slm->victim_line_pq);
+#endif
+	if (!victim_line) {
+		return NULL;
+	}
+#if defined(RD2)
+#else
+	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
+		// force는 강제로 시키는거같고
+		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 놔둬라
+		return NULL;
+	}
+#endif
+#if defined(RD2) || defined(CB_ADVANCED2)
+	pqueue_remove(slm->victim_line_pq, victim_line);
+#else
+	pqueue_pop(slm->victim_line_pq);
+#endif
+	victim_line->pos = 0;
+	slm->victim_line_cnt--;
 
 	/* victim_line is a danggling node now */
 	return victim_line;
@@ -761,11 +869,8 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		/* there shouldn't be any free page in victim blocks */
 		NVMEV_ASSERT(pg_iter->status != PG_FREE);
 		if (pg_iter->status == PG_VALID) {
-			printk(KERN_ERR "DEBUG: Valid Page Found! Block: %d, Page: %d\n", ppa->g.blk, ppa->g.pg);
 			cnt++;
-			conv_ftl->copy_cnt++;
 		}
-
 		ppa_copy.g.pg++;
 	}
 
@@ -1054,7 +1159,6 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 		NVMEV_DEBUG("%s: got new ppa %lld, ", __func__, ppa2pgidx(conv_ftl, &ppa));
 		/* update rmap */
 		set_rmap_ent(conv_ftl, local_lpn, &ppa);
-
 
 		mark_page_valid(conv_ftl, &ppa);
 

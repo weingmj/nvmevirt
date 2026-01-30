@@ -35,6 +35,7 @@ enum {
 enum {
 	USER_IO = 0,
 	GC_IO = 1,
+	MIG_IO = 2,
 };
 
 enum {
@@ -61,11 +62,6 @@ enum { CELL_TYPE_LSB, CELL_TYPE_MSB, CELL_TYPE_CSB, MAX_CELL_TYPES };
 /* describe a physical page addr */
 struct ppa {
 	union {
-		/*
-			각자 다른 정보를 나타내는 게 아니라
-			한 데이터를 세 가지 방법으로 해석하는 가독성 개나 줘버린 방법임
-			ㅡㅡ...
-		*/
 		struct {
 			uint64_t pg : PAGE_BITS; // page == 4KB
 			uint64_t blk : BLK_BITS; // block
@@ -211,6 +207,17 @@ struct ssdparams {
 	unsigned long tt_pls; /* total # of planes in the SSD */
 
 	unsigned long tt_luns; /* total # of LUNs in the SSD */
+
+	/* wei edited - for SLC cache */
+	int pg_4kb_rd_lat_slc;
+	int pg_rd_lat_slc;
+	int pg_wr_lat_slc;
+	int blk_er_lat_slc;
+
+	int oneshotpgs_per_blk_slc;
+	int pgs_per_oneshotpg_slc;
+	int pgs_per_blk_slc;
+	int pgs_per_line_slc;
 
 	unsigned long long write_buffer_size;
 };
