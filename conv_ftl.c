@@ -126,10 +126,49 @@ static void init_lines(struct conv_ftl *conv_ftl)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line *line;
+	int i;
+
+	lm->tt_lines = spp->blks_per_pl;
+	NVMEV_ASSERT(lm->tt_lines == spp->tt_lines);
+	lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
+
+	INIT_LIST_HEAD(&lm->free_line_list);
+	INIT_LIST_HEAD(&lm->full_line_list);
+
+	lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+					 victim_line_set_pri, victim_line_get_pos,
+					 victim_line_set_pos);
+
+	lm->free_line_cnt = 0;
+	for (i = 0; i < lm->tt_lines; i++) {
+		lm->lines[i] = (struct line){
+			.id = i,
+			.ipc = 0,
+			.vpc = 0,
+			.pos = 0,
+			.entry = LIST_HEAD_INIT(lm->lines[i].entry),
+		};
+
+		/* initialize all the lines as free lines */
+		list_add_tail(&lm->lines[i].entry, &lm->free_line_list);
+		lm->free_line_cnt++;
+	}
+
+	NVMEV_ASSERT(lm->free_line_cnt == lm->tt_lines);
+	lm->victim_line_cnt = 0;
+	lm->full_line_cnt = 0;
+}
+
+static void init_lines_slc(struct conv_ftl *conv_ftl)
+{
+	struct ssdparams *spp = &conv_ftl->ssd->sp;
+	struct line_mgmt *lm = &conv_ftl->lm;
 	struct line_mgmt *slm = &conv_ftl->slm;
 	struct line *line;
 	int i;
 	/* init lm and slm */
+	
 	slm->tt_lines = spp->tt_lines * SLC_PORTION / 100;
 	lm->tt_lines = spp->tt_lines - slm->tt_lines;
 	
@@ -192,12 +231,18 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	slm->full_line_cnt = 0;
 }
 
-static void remove_lines(struct conv_ftl *conv_ftl)
+static void remove_lines_slc(struct conv_ftl *conv_ftl)
 {
 	pqueue_free(conv_ftl->lm.victim_line_pq);
 	pqueue_free(conv_ftl->slm.victim_line_pq);
 	vfree(conv_ftl->lm.lines);
 	vfree(conv_ftl->slm.lines);
+}
+
+static void remove_lines(struct conv_ftl *conv_ftl)
+{
+	pqueue_free(conv_ftl->lm.victim_line_pq);
+	vfree(conv_ftl->lm.lines);
 }
 
 static void init_write_flow_control(struct conv_ftl *conv_ftl)
@@ -230,7 +275,7 @@ static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 	return curline;
 }
 
-static struct line *get_next_free_line_slm(struct conv_ftl *conv_ftl)
+static struct line *get_next_free_line_slc(struct conv_ftl *conv_ftl)
 {
 	struct line_mgmt *slm = &conv_ftl->slm;
 	struct line *curline = list_first_entry_or_null(&slm->free_line_list, struct line, entry);
@@ -250,6 +295,18 @@ static struct write_pointer *__get_wp(struct conv_ftl *ftl, uint32_t io_type)
 {
 	if (io_type == USER_IO) {
 		return &ftl->wp;
+	} else if (io_type == GC_IO) {
+		return &ftl->gc_wp;
+	}
+
+	NVMEV_ASSERT(0);
+	return NULL;
+}
+
+static struct write_pointer *__get_wp_slc(struct conv_ftl *ftl, uint32_t io_type)
+{
+	if (io_type == USER_IO) {
+		return &ftl->wp;
 	} else if (io_type == MIG_IO) {
 		return &ftl->mig_wp;
 	} else if (io_type == GC_IO) {
@@ -263,9 +320,28 @@ static struct write_pointer *__get_wp(struct conv_ftl *ftl, uint32_t io_type)
 static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 {
 	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
+	struct line *curline = get_next_free_line(conv_ftl);
+
+	NVMEV_ASSERT(wp);
+	NVMEV_ASSERT(curline);
+
+	/* wp->curline is always our next-to-write super-block */
+	*wp = (struct write_pointer){
+		.curline = curline,
+		.ch = 0,
+		.lun = 0,
+		.pg = 0,
+		.blk = curline->id,
+		.pl = 0,
+	};
+}
+
+static void prepare_write_pointer_slc(struct conv_ftl *conv_ftl, uint32_t io_type)
+{
+	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
 	struct line *curline;
 	if (io_type == USER_IO) {
-		curline = get_next_free_line_slm(conv_ftl);
+		curline = get_next_free_line_slc(conv_ftl);
 	} else if (io_type == MIG_IO || io_type == GC_IO) {
 		curline = get_next_free_line(conv_ftl);
 	}
@@ -552,6 +628,11 @@ static inline bool mapped_ppa(struct ppa *ppa)
 
 static inline struct line *get_line(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
+	return &(conv_ftl->lm.lines[ppa->g.blk]);
+}
+
+static inline struct line *get_line_slc(struct conv_ftl *conv_ftl, struct ppa *ppa)
+{
 	int boundary_line = conv_ftl->slm.tt_lines;
 	if (ppa->g.blk < boundary_line) {
 		return &(conv_ftl->slm.lines[ppa->g.blk]);
@@ -687,6 +768,7 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 
 	mark_page_valid(conv_ftl, &new_ppa);
 	conv_ftl->copy_cnt++;
+
 	/* need to advance the write pointer here */
 	advance_write_pointer(conv_ftl, GC_IO);
 
@@ -715,17 +797,37 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	new_lun = get_lun(conv_ftl, &new_ppa);
 	new_lun->gc_endtime = new_lun->next_lun_avail_time;
 #endif
-
 	return 0;
+}
+
+#define US(a) (a * 1000 * 1000)
+static inline int age_levelize(long long int age_us) {
+	if (age_us < US(2)) {
+		return 1;
+	} else if (age_us < US(6)) {
+		return 4;
+	} else if (age_us < US(12)) {
+		return 9;
+	} else if (age_us < US(24)) {
+		return 16;
+	} else if (age_us < US(48)) {
+		return 25;
+	} else if (age_us < US(96)) {
+		return 36;
+	} else {
+		return 49;
+	}
 }
 
 #define SCALER 1000000000000LL // 1조
 static inline long long int calculate_cost_benefit_val(struct ssdparams *spp, const struct line *cur_line) {
-	long long int age = (ktime_get_ns() - cur_line->mtime) / 1000; // us
+	long long int age_us = (ktime_get_ns() - cur_line->mtime) / 1000; // us
+	int age;
+	age = age_levelize(age_us);
 	int vpc = cur_line->vpc;
 	int ppl = spp->pgs_per_line;
-	if (vpc == ppl || age == 0) {
-		return SCALER * 10; // 분모 0 예외 처리, 의도된 건 분모가 매우 작은 값이니 매우 큰 값을 리턴해야 함
+	if (vpc == ppl) {
+		return SCALER * 10;
 	}
 	return vpc * SCALER / ((ppl - vpc) * age);
 }
@@ -760,7 +862,7 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	if (!victim_line) {
 		return NULL;
 	}
-#if defined(RD)
+#if defined(RD) || defined(CB_ADVANCED)
 #else
 	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
 		// force는 강제로 시키는거같고
@@ -780,7 +882,7 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	return victim_line;
 }
 
-static struct line *select_victim_line_mig(struct conv_ftl *conv_ftl, bool force)
+static struct line *select_victim_line_slc(struct conv_ftl *conv_ftl, bool force)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *slm = &conv_ftl->slm;
