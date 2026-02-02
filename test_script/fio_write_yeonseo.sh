@@ -1,12 +1,22 @@
-fio --filename=/dev/nvme0n1\
- --ioengine=libaio\
- --direct=1\
- --rw=randwrite\
- --bs=4k\
- --size=1200M\
- --io_size=5G\
- --numjobs=1\
- --norandommap=1\
- --randrepeat=0\
- --random_distribution=zipf:1.1\
- --name gc_test
+sudo fio - <<EOF
+[global]
+filename=/dev/nvme0n1
+ioengine=libaio
+direct=1
+bs=4k
+group_reporting
+rw=randwrite
+time_based=1
+runtime=300
+norandommap=1
+
+[cold_data]
+size=2100M
+offset=0
+rate_iops=50
+
+[hot_data]
+size=600M
+offset=2100M
+rate_iops=4000
+EOF

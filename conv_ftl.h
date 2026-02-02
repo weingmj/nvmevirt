@@ -9,6 +9,8 @@
 #include "ssd.h"
 
 struct convparams {
+	uint32_t mig_thres_lines;
+	uint32_t mig_thres_lines_high;
 	uint32_t gc_thres_lines;
 	uint32_t gc_thres_lines_high;
 	bool enable_gc_delay;
@@ -63,7 +65,6 @@ struct conv_ftl {
 	struct ppa *maptbl; /* page level mapping table */
 	uint64_t *rmap; /* reverse mapptbl, assume it's stored in OOB */
 	struct write_pointer wp;
-	struct write_pointer mig_wp;
 	struct write_pointer gc_wp;
 	struct line_mgmt lm;
 	struct line_mgmt slm;

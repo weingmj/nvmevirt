@@ -159,13 +159,13 @@ void ssd_init_params(struct ssdparams *spp, uint64_t capacity, uint32_t nparts)
 	/* TODO: to fix under multiplanes */ // lun size is super-block(line) size
 
 	/* wei edited - for SLC cache */
-	spp->pg_4kb_rd_lat_slc;
-	spp->pg_rd_lat_slc;
-	spp->pg_wr_lat_slc;
-	spp->blk_er_lat_slc;
+	spp->pg_4kb_rd_lat_slc = NAND_4KB_READ_LATENCY_SLC;
+	spp->pg_rd_lat_slc = NAND_READ_LATENCY_SLC;
+	spp->pg_wr_lat_slc = NAND_PROG_LATENCY_SLC;
+	spp->blk_er_lat_slc = NAND_ERASE_LATENCY_SLC;
 
-	spp->oneshotpgs_per_blk_slc;
-	spp->pgs_per_oneshotpg_slc;
+	spp->oneshotpgs_per_blk_slc = DIV_ROUND_UP(blk_size, SLC_ONESHOT_PAGE_SIZE);
+	spp->pgs_per_oneshotpg_slc = SLC_ONESHOT_PAGE_SIZE / (spp->pgsz);
 	spp->pgs_per_blk_slc;
 	spp->pgs_per_line_slc;
 	
