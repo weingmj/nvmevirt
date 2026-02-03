@@ -214,10 +214,18 @@ struct ssdparams {
 	int pg_wr_lat_slc;
 	int blk_er_lat_slc;
 
+	int flashpgs_per_blk_slc;
 	int oneshotpgs_per_blk_slc;
 	int pgs_per_oneshotpg_slc;
 	int pgs_per_blk_slc;
+	int secs_per_blk_slc;
+
+	int secs_per_line_slc;
 	int pgs_per_line_slc;
+
+	int tt_lines_tlc;
+	int tt_lines_slc;
+	/* wei edited end */
 
 	unsigned long long write_buffer_size;
 };

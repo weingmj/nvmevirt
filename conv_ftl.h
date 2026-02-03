@@ -67,10 +67,14 @@ struct conv_ftl {
 	struct write_pointer wp;
 	struct write_pointer gc_wp;
 	struct line_mgmt lm;
-	struct line_mgmt slm;
 	struct write_flow_control wfc;
+	/* assign#1 */
 	uint64_t gc_cnt;
 	uint64_t copy_cnt;
+
+	/* assign#2 */
+	struct line_mgmt slm;
+	int flag
 };
 
 void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,
