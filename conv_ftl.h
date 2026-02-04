@@ -74,7 +74,7 @@ struct conv_ftl {
 
 	/* assign#2 */
 	struct line_mgmt slm;
-	int flag
+	uint8_t slc_mode;
 };
 
 void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,

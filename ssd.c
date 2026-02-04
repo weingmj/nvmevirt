@@ -277,7 +277,7 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 	spp->pgs_per_line_slc = spp->blks_per_line * spp->pgs_per_blk_slc;
 	spp->secs_per_line_slc = spp->secs_per_pg * spp->pgs_per_line_slc;
 
-	spp->tt_lines_tlc = spp->tt_lines - slm->tt_lines;
+	spp->tt_lines_tlc = spp->tt_lines - spp->tt_lines;
 	spp->tt_lines_slc = spp->tt_lines * SLC_PORTION / 100;
 	
 	check_params(spp);

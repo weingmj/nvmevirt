@@ -126,12 +126,22 @@ static void init_lines(struct conv_ftl *conv_ftl)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *slm = &conv_ftl->slm;
 	struct line *line;
-	int i;
+	int i, offset = 0;
 
-	lm->tt_lines = spp->blks_per_pl;
-	NVMEV_ASSERT(lm->tt_lines == spp->tt_lines);
-	lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
+	if (conv_ftl->slc_mode) {
+		slm->tt_lines = spp->tt_lines_slc;
+		lm->tt_lines = spp->tt_lines_tlc;
+		NVMEV_ASSERT(lm->tt_lines + slm->tt_lines == spp->tt_lines);
+		lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
+		slm->lines = vmalloc(sizeof(struct line) * slm->tt_lines);
+	} else {
+		lm->tt_lines = spp->blks_per_pl;
+		NVMEV_ASSERT(lm->tt_lines == spp->tt_lines);
+		lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
+	}
+	
 
 	INIT_LIST_HEAD(&lm->free_line_list);
 	INIT_LIST_HEAD(&lm->full_line_list);
@@ -141,9 +151,12 @@ static void init_lines(struct conv_ftl *conv_ftl)
 					 victim_line_set_pos);
 
 	lm->free_line_cnt = 0;
+	if (conv_ftl->slc_mode) {
+		offset = slm->tt_lines;
+	}
 	for (i = 0; i < lm->tt_lines; i++) {
 		lm->lines[i] = (struct line){
-			.id = i,
+			.id = i + offset,
 			.ipc = 0,
 			.vpc = 0,
 			.pos = 0,
@@ -158,93 +171,44 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	NVMEV_ASSERT(lm->free_line_cnt == lm->tt_lines);
 	lm->victim_line_cnt = 0;
 	lm->full_line_cnt = 0;
-}
-
-static void init_lines_slc(struct conv_ftl *conv_ftl)
-{
-	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	struct line_mgmt *lm = &conv_ftl->lm;
-	struct line_mgmt *slm = &conv_ftl->slm;
-	struct line *line;
-	int i;
-
-	/* init lm and slm */
-	slm->tt_lines = spp->tt_lines * SLC_PORTION / 100;
-	lm->tt_lines = spp->tt_lines - slm->tt_lines;
 	
-	NVMEV_ASSERT(lm->tt_lines + slm->tt_lines == spp->tt_lines);
+	if (conv_ftl->slc_mode) {
+		INIT_LIST_HEAD(&slm->full_line_list);
+		INIT_LIST_HEAD(&slm->free_line_list);
 
-	lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
-	slm->lines = vmalloc(sizeof(struct line) * slm->tt_lines);
+		slm->victim_line_pq = pqueue_init(slm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+						victim_line_set_pri, victim_line_get_pos,
+						victim_line_set_pos);
+		slm->free_line_cnt = 0;
 
-	INIT_LIST_HEAD(&lm->free_line_list);
-	INIT_LIST_HEAD(&lm->full_line_list);
-
-	INIT_LIST_HEAD(&slm->free_line_list);
-	INIT_LIST_HEAD(&slm->full_line_list);
-
-	lm->victim_line_pq = pqueue_init(lm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
-					 victim_line_set_pri, victim_line_get_pos,
-					 victim_line_set_pos);
-
-	slm->victim_line_pq = pqueue_init(slm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
-					 victim_line_set_pri, victim_line_get_pos,
-					 victim_line_set_pos);
-
-	lm->free_line_cnt = 0;
-	slm->free_line_cnt = 0;
-
-	for (i = 0; i < lm->tt_lines; i++) {
-		lm->lines[i] = (struct line){
-			.id = i + slm->tt_lines,
-			.ipc = 0,
-			.vpc = 0,
-			.pos = 0,
-			.entry = LIST_HEAD_INIT(lm->lines[i].entry),
-		};
+		for (i = 0; i < slm->tt_lines; i++) {
+			slm->lines[i] = (struct line) {
+				.id = i,
+				.ipc = 0,
+				.vpc = 0,
+				.pos = 0,
+				.entry = LIST_HEAD_INIT(slm->lines[i].entry),
+			};
+			list_add_tail(&slm->lines[i].entry, &slm->free_line_list);
+			slm->free_line_cnt++;
+		}
 
 		/* initialize all the lines as free lines */
-		list_add_tail(&lm->lines[i].entry, &lm->free_line_list);
-		lm->free_line_cnt++;
+		
+		NVMEV_ASSERT(slm->free_line_cnt == slm->tt_lines);
+		slm->victim_line_cnt = 0;
+		slm->full_line_cnt = 0;
 	}
-
-	NVMEV_ASSERT(lm->free_line_cnt == lm->tt_lines);
-
-	for (i = 0; i < slm->tt_lines; i++) {
-		slm->lines[i] = (struct line){
-			.id = i,
-			.ipc = 0,
-			.vpc = 0,
-			.pos = 0,
-			.entry = LIST_HEAD_INIT(slm->lines[i].entry),
-		};
-
-		/* initialize all the lines as free lines */
-		list_add_tail(&slm->lines[i].entry, &slm->free_line_list);
-		slm->free_line_cnt++;
-	}
-
-	NVMEV_ASSERT(slm->free_line_cnt == slm->tt_lines);
-
-	lm->victim_line_cnt = 0;
-	lm->full_line_cnt = 0;
-
-	slm->victim_line_cnt = 0;
-	slm->full_line_cnt = 0;
 }
 
 static void remove_lines(struct conv_ftl *conv_ftl)
 {
 	pqueue_free(conv_ftl->lm.victim_line_pq);
 	vfree(conv_ftl->lm.lines);
-}
-
-static void remove_lines_slc(struct conv_ftl *conv_ftl)
-{
-	pqueue_free(conv_ftl->lm.victim_line_pq);
-	pqueue_free(conv_ftl->slm.victim_line_pq);
-	vfree(conv_ftl->lm.lines);
-	vfree(conv_ftl->slm.lines);
+	if (conv_ftl->slc_mode) {
+		pqueue_free(conv_ftl->slm.victim_line_pq);
+		vfree(conv_ftl->slm.lines);
+	}
 }
 
 static void init_write_flow_control(struct conv_ftl *conv_ftl)
@@ -252,17 +216,13 @@ static void init_write_flow_control(struct conv_ftl *conv_ftl)
 	struct write_flow_control *wfc = &(conv_ftl->wfc);
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 
-	wfc->write_credits = spp->pgs_per_line;
-	wfc->credits_to_refill = spp->pgs_per_line;
-}
-
-static void init_write_flow_control_slc(struct conv_ftl *conv_ftl)
-{
-	struct write_flow_control *wfc = &(conv_ftl->wfc);
-	struct ssdparams *spp = &conv_ftl->ssd->sp;
-
-	wfc->write_credits = spp->pgs_per_line_slc;
-	wfc->credits_to_refill = spp->pgs_per_line_slc;
+	if (conv_ftl->slc_mode) {
+		wfc->write_credits = spp->pgs_per_line_slc;
+		wfc->credits_to_refill = spp->pgs_per_line_slc;
+	} else {
+		wfc->write_credits = spp->pgs_per_line;
+		wfc->credits_to_refill = spp->pgs_per_line;
+	}
 }
 
 static inline void check_addr(int a, int max)
@@ -272,7 +232,13 @@ static inline void check_addr(int a, int max)
 
 static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 {
-	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *lm;
+	if (conv_ftl->slc_mode) {
+		lm = &conv_ftl->slm;
+	} else {
+		lm = &conv_ftl->lm;
+	}
+	
 	struct line *curline = list_first_entry_or_null(&lm->free_line_list, struct line, entry);
 
 	if (!curline) {
@@ -283,22 +249,6 @@ static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 	list_del_init(&curline->entry);
 	lm->free_line_cnt--;
 	NVMEV_DEBUG("%s: free_line_cnt %d\n", __func__, lm->free_line_cnt);
-	return curline;
-}
-
-static struct line *get_next_free_line_slc(struct conv_ftl *conv_ftl)
-{
-	struct line_mgmt *slm = &conv_ftl->slm;
-	struct line *curline = list_first_entry_or_null(&slm->free_line_list, struct line, entry);
-
-	if (!curline) {
-		NVMEV_ERROR("No free line left in VIRT(slm) !!!!\n");
-		return NULL;
-	}
-
-	list_del_init(&curline->entry);
-	slm->free_line_cnt--;
-	NVMEV_DEBUG("%s: free_line_cnt %d\n", __func__, slm->free_line_cnt);
 	return curline;
 }
 
@@ -323,30 +273,7 @@ static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	NVMEV_ASSERT(curline);
 
 	/* wp->curline is always our next-to-write super-block */
-	*wp = (struct write_pointer){
-		.curline = curline,
-		.ch = 0,
-		.lun = 0,
-		.pg = 0,
-		.blk = curline->id,
-		.pl = 0,
-	};
-}
-
-static void prepare_write_pointer_slc(struct conv_ftl *conv_ftl, uint32_t io_type)
-{
-	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
-	struct line *curline;
-	if (io_type == USER_IO) {
-		curline = get_next_free_line_slc(conv_ftl);
-	} else if (io_type == GC_IO) {
-		curline = get_next_free_line(conv_ftl);
-	}
-	NVMEV_ASSERT(wp);
-	NVMEV_ASSERT(curline);
-
-	/* wp->curline is always our next-to-write super-block */
-	*wp = (struct write_pointer){
+	*wp = (struct write_pointer) {
 		.curline = curline,
 		.ch = 0,
 		.lun = 0,
@@ -571,44 +498,9 @@ static void conv_init_ftl(struct conv_ftl *conv_ftl, struct convparams *cpp, str
 	return;
 }
 
-static void conv_init_ftl_slc(struct conv_ftl *conv_ftl, struct convparams *cpp, struct ssd *ssd)
-{
-	/*copy convparams*/
-	conv_ftl->cp = *cpp;
-
-	conv_ftl->ssd = ssd;
-
-	/* initialize maptbl */
-	init_maptbl(conv_ftl); // mapping table
-
-	/* initialize rmap */
-	init_rmap(conv_ftl); // reverse mapping table (?)
-
-	/* initialize all the lines */
-	init_lines_slc(conv_ftl);
-
-	/* initialize write pointer, this is how we allocate new pages for writes */
-	prepare_write_pointer_slc(conv_ftl, USER_IO);
-	prepare_write_pointer_slc(conv_ftl, GC_IO);
-
-	init_write_flow_control_slc(conv_ftl);
-
-	NVMEV_INFO("Init FTL instance(with SLC cache) with %d channels (%ld pages)\n", conv_ftl->ssd->sp.nchs,
-		   conv_ftl->ssd->sp.tt_pgs);
-
-	return;
-}
-
 static void conv_remove_ftl(struct conv_ftl *conv_ftl)
 {
 	remove_lines(conv_ftl);
-	remove_rmap(conv_ftl);
-	remove_maptbl(conv_ftl);
-}
-
-static void conv_remove_ftl_slc(struct conv_ftl *conv_ftl)
-{
-	remove_lines_slc(conv_ftl);
 	remove_rmap(conv_ftl);
 	remove_maptbl(conv_ftl);
 }
@@ -620,19 +512,9 @@ static void conv_init_params(struct convparams *cpp)
 	cpp->gc_thres_lines_high = 2; /* Need only two lines.(host write, gc)*/
 	cpp->enable_gc_delay = 1;
 	cpp->pba_pcent = (int)((1 + cpp->op_area_pcent) * 100);
-}
-
-static void conv_init_params_slc(struct convparams *cpp)
-{
-	cpp->op_area_pcent = OP_AREA_PERCENT;
-	cpp->gc_thres_lines = 2; /* Need only two lines.(host write, gc)*/
-	cpp->gc_thres_lines_high = 2; /* Need only two lines.(host write, gc)*/
 	/* for SLC cache */
 	cpp->mig_thres_lines = 2;
 	cpp->mig_thres_lines_high = 2;
-	/* SLC cache end */
-	cpp->enable_gc_delay = 1;
-	cpp->pba_pcent = (int)((1 + cpp->op_area_pcent) * 100);
 }
 
 void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,
@@ -725,38 +607,21 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		return false;
 	if (blk < 0 || blk >= spp->blks_per_pl)
 		return false;
-	if (pg < 0 || pg >= spp->pgs_per_blk)
-		return false;
-
-	return true;
-}
-
-static inline bool valid_ppa_slc(struct conv_ftl *conv_ftl, struct ppa *ppa)
-{
-	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	int ch = ppa->g.ch;
-	int lun = ppa->g.lun;
-	int pl = ppa->g.pl;
-	int blk = ppa->g.blk;
-	int pg = ppa->g.pg;
-	//int sec = ppa->g.sec;
-
-	if (ch < 0 || ch >= spp->nchs)
-		return false;
-	if (lun < 0 || lun >= spp->luns_per_ch)
-		return false;
-	if (pl < 0 || pl >= spp->pls_per_lun)
-		return false;
-	if (blk < 0 || blk >= spp->blks_per_pl)
-		return false;
-	if (blk < conv_ftl->slm.tt_lines) {
-		NVMEV_DEBUG("[WEI] blk: %d, line_limit(slm's tt_lines): %d", blk, conv_ftl->slm.tt_lines);
-		if (pg < 0 || pg >= spp->pgs_per_blk_slc)
-			return false;
+	if (conv_ftl->slc_mode) {
+		if (blk < conv_ftl->slm.tt_lines) {
+			NVMEV_DEBUG("[WEI] blk: %d, line_limit(slm's tt_lines): %d", blk, conv_ftl->slm.tt_lines);
+			if (pg < 0 || pg >= spp->pgs_per_blk_slc)
+				return false;
+		} else {
+			if (pg < 0 || pg >= spp->pgs_per_blk)
+				return false;
+		}
 	} else {
 		if (pg < 0 || pg >= spp->pgs_per_blk)
 			return false;
 	}
+	
+
 	return true;
 }
 
@@ -772,16 +637,15 @@ static inline bool mapped_ppa(struct ppa *ppa)
 
 static inline struct line *get_line(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
-	return &(conv_ftl->lm.lines[ppa->g.blk]);
-}
-
-static inline struct line *get_line_slc(struct conv_ftl *conv_ftl, struct ppa *ppa)
-{
-	int boundary_line = conv_ftl->slm.tt_lines;
-	if (ppa->g.blk < boundary_line) {
-		return &(conv_ftl->slm.lines[ppa->g.blk]);
+	if (conv_ftl->slc_mode) {
+		int boundary_line = conv_ftl->slm.tt_lines;
+		if (ppa->g.blk < boundary_line) {
+			return &(conv_ftl->slm.lines[ppa->g.blk]);
+		} else {
+			return &(conv_ftl->lm.lines[ppa->g.blk - boundary_line]);
+		}
 	} else {
-		return &(conv_ftl->lm.lines[ppa->g.blk - boundary_line]);
+		return &(conv_ftl->lm.lines[ppa->g.blk]);
 	}
 }
 
@@ -802,6 +666,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 
 	/* update corresponding block status */
 	blk = get_blk(conv_ftl->ssd, ppa);
+	
 	NVMEV_ASSERT(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
 	blk->ipc++;
 	NVMEV_ASSERT(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
