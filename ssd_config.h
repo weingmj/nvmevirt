@@ -23,6 +23,10 @@
 #define CELL_MODE_TLC 3
 #define CELL_MODE_QLC 4
 
+/* SLC Cache Mode */
+#define ENABLE_SLC_CACHE  1
+//#define ENABLE_SLC_CACHE  0
+
 /* Must select one of INTEL_OPTANE, SAMSUNG_970PRO, or ZNS_PROTOTYPE
  * in Makefile */
 
@@ -75,7 +79,7 @@ enum {
 #define LUNS_PER_NAND_CH (4) // wei_edit
 #define PLNS_PER_LUN (1)
 #define FLASH_PAGE_SIZE KB(16) // wei_edit
-#define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 3) 
+#define ONESHOT_PAGE_SIZE (FLASH_PAGE_SIZE * 3)
 #define BLKS_PER_PLN (1024) // wei_edit
 #define BLK_SIZE (0) /*BLKS_PER_PLN should not be 0 */
 static_assert((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);

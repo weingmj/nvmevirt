@@ -183,7 +183,6 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 	spp->pls_per_lun = PLNS_PER_LUN;
 	spp->luns_per_ch = LUNS_PER_NAND_CH;
 	spp->cell_mode = CELL_MODE;
-
 	/* partitioning SSD by dividing channel*/
 	NVMEV_ASSERT((spp->nchs % nparts) == 0);
 	spp->nchs /= nparts;
@@ -200,6 +199,8 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 		spp->blks_per_pl = DIV_ROUND_UP(capacity, blk_size * spp->pls_per_lun *
 								  spp->luns_per_ch * spp->nchs);
 	}
+
+	spp->tt_lines = spp->blks_per_pl;
 
 	NVMEV_ASSERT((ONESHOT_PAGE_SIZE % spp->pgsz) == 0 && (FLASH_PAGE_SIZE % spp->pgsz) == 0);
 	NVMEV_ASSERT((ONESHOT_PAGE_SIZE % FLASH_PAGE_SIZE) == 0);
@@ -236,14 +237,30 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 	spp->write_buffer_size = GLOBAL_WB_SIZE;
 	spp->write_early_completion = WRITE_EARLY_COMPLETION;
 
-	/* calculated values */
+	/* wei edited - for SLC cache */
+	spp->pg_4kb_rd_lat_slc = NAND_4KB_READ_LATENCY_SLC;
+	spp->pg_rd_lat_slc = NAND_READ_LATENCY_SLC;
+	spp->pg_wr_lat_slc = NAND_PROG_LATENCY_SLC;
+	spp->blk_er_lat_slc = NAND_ERASE_LATENCY_SLC;
+
+	spp->oneshotpgs_per_blk_slc = spp->oneshotpgs_per_blk; // 192 / 48 == 64 / 16
+	spp->pgs_per_oneshotpg_slc = SLC_ONESHOT_PAGE_SIZE / spp->pgsz;
+	spp->flashpgs_per_blk_slc = (SLC_ONESHOT_PAGE_SIZE / FLASH_PAGE_SIZE) * spp->oneshotpgs_per_blk_slc;
+	spp->pgs_per_blk_slc = spp->pgs_per_oneshotpg_slc * spp->oneshotpgs_per_blk_slc;
+
+	spp->tt_lines_slc = spp->tt_lines * SLC_PORTION / 100; // same as blks_per_pl 
+	spp->tt_lines_tlc = spp->tt_lines - spp->tt_lines_slc;
+	/* wei edited end*/
+
+	/* calculated values - wei edited */
 	spp->secs_per_blk = spp->secs_per_pg * spp->pgs_per_blk;
-	spp->secs_per_pl = spp->secs_per_blk * spp->blks_per_pl;
+	spp->secs_per_blk_slc = spp->secs_per_pg * spp->pgs_per_blk_slc;
+	spp->secs_per_pl = spp->secs_per_blk * spp->tt_lines_tlc + spp->secs_per_blk_slc * spp->tt_lines_slc;
 	spp->secs_per_lun = spp->secs_per_pl * spp->pls_per_lun;
 	spp->secs_per_ch = spp->secs_per_lun * spp->luns_per_ch;
 	spp->tt_secs = spp->secs_per_ch * spp->nchs;
 
-	spp->pgs_per_pl = spp->pgs_per_blk * spp->blks_per_pl;
+	spp->pgs_per_pl = spp->pgs_per_blk_slc * spp->tt_lines_slc + spp->pgs_per_blk * spp->tt_lines_tlc;
 	spp->pgs_per_lun = spp->pgs_per_pl * spp->pls_per_lun;
 	spp->pgs_per_ch = spp->pgs_per_lun * spp->luns_per_ch;
 	spp->tt_pgs = spp->pgs_per_ch * spp->nchs;
@@ -258,32 +275,21 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 	spp->tt_luns = spp->luns_per_ch * spp->nchs;
 
 	/* line is special, put it at the end */
-	spp->blks_per_line = spp->tt_luns; /* TODO: to fix under multiplanes */
-	spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
-	spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
-	spp->tt_lines = spp->blks_per_lun;
-	/* TODO: to fix under multiplanes */ // lun size is super-block(line) size
-
-	/* wei edited - for SLC cache */
-	spp->pg_4kb_rd_lat_slc = NAND_4KB_READ_LATENCY_SLC;
-	spp->pg_rd_lat_slc = NAND_READ_LATENCY_SLC;
-	spp->pg_wr_lat_slc = NAND_PROG_LATENCY_SLC;
-	spp->blk_er_lat_slc = NAND_ERASE_LATENCY_SLC;
-
-	spp->oneshotpgs_per_blk_slc = DIV_ROUND_UP(blk_size, SLC_ONESHOT_PAGE_SIZE);
-	spp->pgs_per_oneshotpg_slc = SLC_ONESHOT_PAGE_SIZE / (spp->pgsz);
-	spp->flashpgs_per_blk_slc = (SLC_ONESHOT_PAGE_SIZE / FLASH_PAGE_SIZE) * spp->oneshotpgs_per_blk_slc;
-	spp->pgs_per_blk_slc = spp->pgs_per_oneshotpg_slc * spp->oneshotpgs_per_blk_slc;
+	 /* TODO: to fix under multiplanes */
+	spp->blks_per_line = spp->tt_luns;
 	spp->pgs_per_line_slc = spp->blks_per_line * spp->pgs_per_blk_slc;
 	spp->secs_per_line_slc = spp->secs_per_pg * spp->pgs_per_line_slc;
 
-	spp->tt_lines_tlc = spp->tt_lines - spp->tt_lines;
-	spp->tt_lines_slc = spp->tt_lines * SLC_PORTION / 100;
+	spp->pgs_per_line = spp->blks_per_line * spp->pgs_per_blk;
+	spp->secs_per_line = spp->pgs_per_line * spp->secs_per_pg;
+	NVMEV_ASSERT(BLKS_PER_PLN == spp->tt_lines);
+	/* TODO: to fix under multiplanes */ // lun size is super-block(line) size
 	
 	check_params(spp);
 
-	total_size = (unsigned long)spp->tt_luns * spp->blks_per_lun * spp->pgs_per_blk *
-		     spp->secsz * spp->secs_per_pg;
+	total_size = (unsigned long)spp->tt_luns * 
+	(spp->tt_lines_tlc * spp->pgs_per_blk * spp->secsz * spp->secs_per_pg 
+	+ spp->tt_lines_slc * spp->pgs_per_blk_slc * spp->secsz * spp->secs_per_pg);
 	blk_size = spp->pgs_per_blk * spp->secsz * spp->secs_per_pg;
 	NVMEV_INFO(
 		"Total Capacity(GiB,MiB)=%llu,%llu chs=%u luns=%lu lines=%lu blk-size(MiB,KiB)=%u,%u line-size(MiB,KiB)=%lu,%lu",

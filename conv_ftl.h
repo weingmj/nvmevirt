@@ -8,6 +8,11 @@
 #include "ssd_config.h"
 #include "ssd.h"
 
+enum line_mode {
+	SLC_MODE, 
+	TLC_MODE
+};
+
 struct convparams {
 	uint32_t mig_thres_lines;
 	uint32_t mig_thres_lines_high;
@@ -74,7 +79,8 @@ struct conv_ftl {
 
 	/* assign#2 */
 	struct line_mgmt slm;
-	uint8_t slc_mode;
+	enum line_mode slc_mode; // no changed after initialized
+	enum line_mode dyn_slc_mode; // changed by where curline belonged
 };
 
 void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *mapped_addr,

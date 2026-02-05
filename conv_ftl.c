@@ -18,6 +18,12 @@ static inline bool last_pg_in_wordline(struct conv_ftl *conv_ftl, struct ppa *pp
 	return (ppa->g.pg % spp->pgs_per_oneshotpg) == (spp->pgs_per_oneshotpg - 1);
 }
 
+static inline bool last_pg_in_wordline_slc(struct conv_ftl *conv_ftl, struct ppa *ppa)
+{
+	struct ssdparams *spp = &conv_ftl->ssd->sp;
+	return (ppa->g.pg % spp->pgs_per_oneshotpg_slc) == (spp->pgs_per_oneshotpg_slc - 1);
+}
+
 static bool should_gc(struct conv_ftl *conv_ftl)
 {
 	return (conv_ftl->lm.free_line_cnt <= conv_ftl->cp.gc_thres_lines);
@@ -57,9 +63,20 @@ static uint64_t ppa2pgidx(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	NVMEV_DEBUG_VERBOSE("%s: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
 			ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
 
-	pgidx = ppa->g.ch * spp->pgs_per_ch + ppa->g.lun * spp->pgs_per_lun +
-		ppa->g.pl * spp->pgs_per_pl + ppa->g.blk * spp->pgs_per_blk + ppa->g.pg;
-
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		if (ppa->g.blk < spp->tt_lines_slc) { // in slc index
+			pgidx = ppa->g.ch * spp->pgs_per_ch + ppa->g.lun * spp->pgs_per_lun +
+				ppa->g.pl * spp->pgs_per_pl + ppa->g.blk * spp->pgs_per_blk_slc + ppa->g.pg;
+		} else {
+			pgidx =	ppa->g.ch * spp->pgs_per_ch + ppa->g.lun * spp->pgs_per_lun +
+				ppa->g.pl * spp->pgs_per_pl + (spp->tt_lines_slc * spp->pgs_per_blk_slc + 
+				(ppa->g.blk - spp->tt_lines_slc) * spp->pgs_per_blk) + ppa->g.pg;
+		}
+	} else {
+		pgidx = ppa->g.ch * spp->pgs_per_ch + ppa->g.lun * spp->pgs_per_lun +
+			ppa->g.pl * spp->pgs_per_pl + ppa->g.blk * spp->pgs_per_blk + ppa->g.pg;
+	}
+	
 	NVMEV_ASSERT(pgidx < spp->tt_pgs);
 
 	return pgidx;
@@ -117,7 +134,6 @@ static inline void check_and_refill_write_credit(struct conv_ftl *conv_ftl)
 	struct write_flow_control *wfc = &(conv_ftl->wfc);
 	if (wfc->write_credits <= 0) {
 		foreground_gc(conv_ftl);
-
 		wfc->write_credits += wfc->credits_to_refill;
 	}
 }
@@ -130,9 +146,9 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	struct line *line;
 	int i, offset = 0;
 
-	if (conv_ftl->slc_mode) {
-		slm->tt_lines = spp->tt_lines_slc;
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		lm->tt_lines = spp->tt_lines_tlc;
+		slm->tt_lines = spp->tt_lines_slc;
 		NVMEV_ASSERT(lm->tt_lines + slm->tt_lines == spp->tt_lines);
 		lm->lines = vmalloc(sizeof(struct line) * lm->tt_lines);
 		slm->lines = vmalloc(sizeof(struct line) * slm->tt_lines);
@@ -151,9 +167,11 @@ static void init_lines(struct conv_ftl *conv_ftl)
 					 victim_line_set_pos);
 
 	lm->free_line_cnt = 0;
-	if (conv_ftl->slc_mode) {
-		offset = slm->tt_lines;
+
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		offset = slm->tt_lines; // lm_lines are after slm_lines
 	}
+
 	for (i = 0; i < lm->tt_lines; i++) {
 		lm->lines[i] = (struct line){
 			.id = i + offset,
@@ -172,7 +190,7 @@ static void init_lines(struct conv_ftl *conv_ftl)
 	lm->victim_line_cnt = 0;
 	lm->full_line_cnt = 0;
 	
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		INIT_LIST_HEAD(&slm->full_line_list);
 		INIT_LIST_HEAD(&slm->free_line_list);
 
@@ -205,7 +223,7 @@ static void remove_lines(struct conv_ftl *conv_ftl)
 {
 	pqueue_free(conv_ftl->lm.victim_line_pq);
 	vfree(conv_ftl->lm.lines);
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		pqueue_free(conv_ftl->slm.victim_line_pq);
 		vfree(conv_ftl->slm.lines);
 	}
@@ -216,7 +234,7 @@ static void init_write_flow_control(struct conv_ftl *conv_ftl)
 	struct write_flow_control *wfc = &(conv_ftl->wfc);
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		wfc->write_credits = spp->pgs_per_line_slc;
 		wfc->credits_to_refill = spp->pgs_per_line_slc;
 	} else {
@@ -233,7 +251,7 @@ static inline void check_addr(int a, int max)
 static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 {
 	struct line_mgmt *lm;
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->dyn_slc_mode) {
 		lm = &conv_ftl->slm;
 	} else {
 		lm = &conv_ftl->lm;
@@ -259,14 +277,20 @@ static struct write_pointer *__get_wp(struct conv_ftl *ftl, uint32_t io_type)
 	} else if (io_type == GC_IO) {
 		return &ftl->gc_wp;
 	}
-
-	NVMEV_ASSERT(0);
+	
 	return NULL;
 }
 
 static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 {
 	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
+
+	if (io_type == USER_IO) {
+		conv_ftl->dyn_slc_mode = SLC_MODE;
+	} else if (io_type == GC_IO) {
+		conv_ftl->dyn_slc_mode = TLC_MODE;
+	}
+
 	struct line *curline = get_next_free_line(conv_ftl);
 
 	NVMEV_ASSERT(wp);
@@ -527,12 +551,18 @@ void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *
 	uint32_t i;
 	const uint32_t nr_parts = SSD_PARTITIONS;
 
-	ssd_init_params(&spp, size, nr_parts);
+	if (ENABLE_SLC_CACHE) {
+		ssd_init_params_slc(&spp, size, nr_parts);
+	} else {
+		ssd_init_params(&spp, size, nr_parts);
+	}
+	
 	conv_init_params(&cpp);
 
 	conv_ftls = kmalloc(sizeof(struct conv_ftl) * nr_parts, GFP_KERNEL);
 
 	for (i = 0; i < nr_parts; i++) {
+		conv_ftls[i].slc_mode = ENABLE_SLC_CACHE;
 		ssd = kmalloc(sizeof(struct ssd), GFP_KERNEL);
 		ssd_init(ssd, &spp, cpu_nr_dispatcher);
 		conv_init_ftl(&conv_ftls[i], &cpp, ssd);
@@ -607,7 +637,7 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		return false;
 	if (blk < 0 || blk >= spp->blks_per_pl)
 		return false;
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (blk < conv_ftl->slm.tt_lines) {
 			NVMEV_DEBUG("[WEI] blk: %d, line_limit(slm's tt_lines): %d", blk, conv_ftl->slm.tt_lines);
 			if (pg < 0 || pg >= spp->pgs_per_blk_slc)
@@ -637,7 +667,7 @@ static inline bool mapped_ppa(struct ppa *ppa)
 
 static inline struct line *get_line(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
-	if (conv_ftl->slc_mode) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
 		int boundary_line = conv_ftl->slm.tt_lines;
 		if (ppa->g.blk < boundary_line) {
 			return &(conv_ftl->slm.lines[ppa->g.blk]);
@@ -1276,17 +1306,31 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 		mark_page_valid(conv_ftl, &ppa);
 
 		/* need to advance the write pointer here */
-		advance_write_pointer(conv_ftl, USER_IO);
+		
 
 		/* Aggregate write io in flash page */
-		if (last_pg_in_wordline(conv_ftl, &ppa)) { // 한 라인을 다 모았니?
-			swr.ppa = &ppa;
+		if (conv_ftl->slc_mode == SLC_MODE) {
+			advance_write_pointer_slc(conv_ftl, USER_IO);
+			if (last_pg_in_wordline_slc(conv_ftl, &ppa)) { // 한 라인을 다 모았니?
+				swr.ppa = &ppa;
 
-			nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &swr); 
-			nsecs_latest = max(nsecs_completed, nsecs_latest);
+				nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &swr); 
+				nsecs_latest = max(nsecs_completed, nsecs_latest);
 
-			schedule_internal_operation(req->sq_id, nsecs_completed, wbuf,
-						    spp->pgs_per_oneshotpg * spp->pgsz); // 모아둔 라인에 대한 I/O 요청을 SQ에 넣음(나중에 스케쥴링되어 실행될 예정)
+				schedule_internal_operation(req->sq_id, nsecs_completed, wbuf,
+								spp->pgs_per_oneshotpg_slc * spp->pgsz); // 모아둔 라인에 대한 I/O 요청을 SQ에 넣음(나중에 스케쥴링되어 실행될 예정)
+			}
+		} else {
+			advance_write_pointer(conv_ftl, USER_IO);
+			if (last_pg_in_wordline(conv_ftl, &ppa)) { // 한 라인을 다 모았니?
+				swr.ppa = &ppa;
+
+				nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &swr); 
+				nsecs_latest = max(nsecs_completed, nsecs_latest);
+
+				schedule_internal_operation(req->sq_id, nsecs_completed, wbuf,
+								spp->pgs_per_oneshotpg * spp->pgsz); // 모아둔 라인에 대한 I/O 요청을 SQ에 넣음(나중에 스케쥴링되어 실행될 예정)
+			}
 		}
 
 		consume_write_credit(conv_ftl); // write pointer에 page를 하나 썼다고 생각하고, 라인 내 작성 가능한 page 카운트를 1 감소시킴
