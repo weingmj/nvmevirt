@@ -312,7 +312,12 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *lm = &conv_ftl->lm;
 	struct write_pointer *wpp = __get_wp(conv_ftl, io_type);
-	NVMEV_ASSERT(io_type == GC_IO);
+	
+	if (io_type == GC_IO && conv_ftl->dyn_slc_mode == TLC_MODE) {
+
+	} else if (io_type = USER_IO && conv_ftl->dyn_slc_mode == SLC_MODE) {
+
+	}
 
 	NVMEV_DEBUG_VERBOSE("current wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n",
 			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg);
@@ -359,6 +364,7 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	}
 	/* current line is used up, pick another empty line */
 	check_addr(wpp->blk, spp->blks_per_pl);
+	conv_ftl->dyn_slc_mode = TLC_MODE;
 	wpp->curline = get_next_free_line(conv_ftl);
 	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
 
@@ -428,6 +434,7 @@ static void advance_write_pointer_slc(struct conv_ftl *conv_ftl, uint32_t io_typ
 	}
 	/* current line is used up, pick another empty line */
 	check_addr(wpp->blk, spp->blks_per_pl);
+	conv_ftl->dyn_slc_mode = SLC_MODE;
 	wpp->curline = get_next_free_line(conv_ftl);
 	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
 
@@ -639,7 +646,6 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		return false;
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (blk < conv_ftl->slm.tt_lines) {
-			NVMEV_DEBUG("[WEI] blk: %d, line_limit(slm's tt_lines): %d", blk, conv_ftl->slm.tt_lines);
 			if (pg < 0 || pg >= spp->pgs_per_blk_slc)
 				return false;
 		} else {
@@ -650,7 +656,6 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		if (pg < 0 || pg >= spp->pgs_per_blk)
 			return false;
 	}
-	
 
 	return true;
 }
