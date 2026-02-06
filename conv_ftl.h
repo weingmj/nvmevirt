@@ -14,11 +14,13 @@ enum line_mode {
 };
 
 struct convparams {
-	uint32_t mig_thres_lines;
-	uint32_t mig_thres_lines_high;
 	uint32_t gc_thres_lines;
 	uint32_t gc_thres_lines_high;
 	bool enable_gc_delay;
+
+	/* wei edited */
+	uint32_t mig_thres_lines;
+	uint32_t mig_thres_lines_high;
 
 	double op_area_pcent;
 	int pba_pcent; /* (physical space / logical space) * 100*/

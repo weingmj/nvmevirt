@@ -489,6 +489,11 @@ uint64_t ssd_advance_write_buffer(struct ssd *ssd, uint64_t request_time, uint64
 
 uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 {
+	/*
+		TODO:
+		ppa가 SLC cache 영역에 속하면 latency 값 바뀜
+		그래서 ppa로 분기 나눠서 latency값 바꿔줄 필요 있음
+	*/
 	int c = ncmd->cmd;
 	uint64_t cmd_stime = (ncmd->stime == 0) ? __get_ioclock(ssd) : ncmd->stime;
 	uint64_t nand_stime, nand_etime;

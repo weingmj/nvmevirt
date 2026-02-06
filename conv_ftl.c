@@ -251,7 +251,7 @@ static inline void check_addr(int a, int max)
 static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 {
 	struct line_mgmt *lm;
-	if (conv_ftl->dyn_slc_mode) {
+	if (conv_ftl->dyn_slc_mode == SLC_MODE) {
 		lm = &conv_ftl->slm;
 	} else {
 		lm = &conv_ftl->lm;
@@ -310,24 +310,35 @@ static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *lm;
 	struct write_pointer *wpp = __get_wp(conv_ftl, io_type);
+	int cur_pgs_per_blk = 0;
+	int cur_pgs_per_oneshotpg = 0;
+	int cur_pgs_per_line = 0;
 	
 	if (io_type == GC_IO && conv_ftl->dyn_slc_mode == TLC_MODE) {
-
-	} else if (io_type = USER_IO && conv_ftl->dyn_slc_mode == SLC_MODE) {
-
+		lm = &conv_ftl->lm;
+		cur_pgs_per_blk = spp->pgs_per_blk;
+		cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg;
+		cur_pgs_per_line = spp->pgs_per_line;
+	} else if (io_type == USER_IO && conv_ftl->dyn_slc_mode == SLC_MODE) {
+		lm = &conv_ftl->slm;
+		cur_pgs_per_blk = spp->pgs_per_blk_slc;
+		cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg_slc;
+		cur_pgs_per_line = spp->pgs_per_line_slc;
+	} else {
+		NVMEV_ERROR("io_type : %d, dyn_slc_mode : %d\n", io_type, conv_ftl->dyn_slc_mode);
 	}
 
 	NVMEV_DEBUG_VERBOSE("current wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n",
 			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg);
 
-	check_addr(wpp->pg, spp->pgs_per_blk);
+	check_addr(wpp->pg, cur_pgs_per_blk);
 	wpp->pg++;
-	if ((wpp->pg % spp->pgs_per_oneshotpg) != 0)
+	if ((wpp->pg % cur_pgs_per_oneshotpg) != 0)
 		goto out;
 
-	wpp->pg -= spp->pgs_per_oneshotpg;
+	wpp->pg -= cur_pgs_per_oneshotpg;
 	check_addr(wpp->ch, spp->nchs);
 	wpp->ch++;
 	if (wpp->ch != spp->nchs)
@@ -342,13 +353,13 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 
 	wpp->lun = 0;
 	/* go to next wordline in the block */
-	wpp->pg += spp->pgs_per_oneshotpg;
-	if (wpp->pg != spp->pgs_per_blk)
+	wpp->pg += cur_pgs_per_oneshotpg;
+	if (wpp->pg != cur_pgs_per_blk)
 		goto out;
 
 	wpp->pg = 0;
 	/* move current line to {victim,full} line list */
-	if (wpp->curline->vpc == spp->pgs_per_line) {
+	if (wpp->curline->vpc == cur_pgs_per_line) {
 		/* all pgs are still valid, move to full line list */
 		NVMEV_ASSERT(wpp->curline->ipc == 0);
 		list_add_tail(&wpp->curline->entry, &lm->full_line_list);
@@ -356,7 +367,7 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 		NVMEV_DEBUG_VERBOSE("wpp: move line to full_line_list\n");
 	} else {
 		NVMEV_DEBUG_VERBOSE("wpp: line is moved to victim list\n");
-		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line);
+		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < cur_pgs_per_line);
 		/* there must be some invalid pages in this line */
 		NVMEV_ASSERT(wpp->curline->ipc > 0);
 		pqueue_insert(lm->victim_line_pq, wpp->curline);
@@ -364,77 +375,6 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	}
 	/* current line is used up, pick another empty line */
 	check_addr(wpp->blk, spp->blks_per_pl);
-	conv_ftl->dyn_slc_mode = TLC_MODE;
-	wpp->curline = get_next_free_line(conv_ftl);
-	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
-
-	wpp->blk = wpp->curline->id;
-	check_addr(wpp->blk, spp->blks_per_pl);
-
-	/* make sure we are starting from page 0 in the super block */
-	NVMEV_ASSERT(wpp->pg == 0);
-	NVMEV_ASSERT(wpp->lun == 0);
-	NVMEV_ASSERT(wpp->ch == 0);
-	/* TODO: assume # of pl_per_lun is 1, fix later */
-	NVMEV_ASSERT(wpp->pl == 0);
-out:
-	NVMEV_DEBUG_VERBOSE("advanced wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d (curline %d)\n",
-			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg, wpp->curline->id);
-}
-
-static void advance_write_pointer_slc(struct conv_ftl *conv_ftl, uint32_t io_type) 
-{
-	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	struct line_mgmt *slm = &conv_ftl->slm;
-	struct write_pointer *wpp = __get_wp(conv_ftl, io_type);
-	NVMEV_ASSERT(io_type == USER_IO); // io_type이 USER_IO인 경우에만 / GC_IO에 콜되면 대참사 일어남
-
-	NVMEV_DEBUG_VERBOSE("current wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n",
-			wpp->ch, wpp->lun, wpp->pl, wpp->blk, wpp->pg);
-
-	check_addr(wpp->pg, spp->pgs_per_blk_slc);
-	wpp->pg++;
-	if ((wpp->pg % spp->pgs_per_oneshotpg_slc) != 0)
-		goto out;
-
-	wpp->pg -= spp->pgs_per_oneshotpg_slc;
-	check_addr(wpp->ch, spp->nchs);
-	wpp->ch++;
-	if (wpp->ch != spp->nchs)
-		goto out;
-
-	wpp->ch = 0;
-	check_addr(wpp->lun, spp->luns_per_ch);
-	wpp->lun++;
-	/* in this case, we should go to next lun */
-	if (wpp->lun != spp->luns_per_ch)
-		goto out;
-
-	wpp->lun = 0;
-	/* go to next wordline in the block */
-	wpp->pg += spp->pgs_per_oneshotpg_slc;
-	if (wpp->pg != spp->pgs_per_blk_slc)
-		goto out;
-
-	wpp->pg = 0;
-	/* move current line to {victim,full} line list */
-	if (wpp->curline->vpc == spp->pgs_per_line_slc) {
-		/* all pgs are still valid, move to full line list */
-		NVMEV_ASSERT(wpp->curline->ipc == 0);
-		list_add_tail(&wpp->curline->entry, &slm->full_line_list);
-		slm->full_line_cnt++;
-		NVMEV_DEBUG_VERBOSE("wpp: move line to full_line_list_slc\n");
-	} else {
-		NVMEV_DEBUG_VERBOSE("wpp: line is moved to victim list_slc\n");
-		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line_slc);
-		/* there must be some invalid pages in this line */
-		NVMEV_ASSERT(wpp->curline->ipc > 0);
-		pqueue_insert(slm->victim_line_pq, wpp->curline);
-		slm->victim_line_cnt++;
-	}
-	/* current line is used up, pick another empty line */
-	check_addr(wpp->blk, spp->blks_per_pl);
-	conv_ftl->dyn_slc_mode = SLC_MODE;
 	wpp->curline = get_next_free_line(conv_ftl);
 	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
 
@@ -688,11 +628,30 @@ static inline struct line *get_line(struct conv_ftl *conv_ftl, struct ppa *ppa)
 static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	struct line_mgmt *lm = &conv_ftl->lm;
 	struct nand_block *blk = NULL;
 	struct nand_page *pg = NULL;
 	bool was_full_line = false;
 	struct line *line;
+
+	struct line_mgmt *lm;
+	int cur_pgs_per_blk;
+	int cur_pgs_per_line;
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		if (ppa->g.blk < spp->tt_lines_slc) { // this ppa is in SLC cache area
+			lm = &conv_ftl->slm;
+			cur_pgs_per_blk = spp->pgs_per_blk_slc;
+			cur_pgs_per_line = spp->pgs_per_line_slc;
+		} else {
+			lm = &conv_ftl->lm;
+			cur_pgs_per_blk = spp->pgs_per_blk;
+			cur_pgs_per_line = spp->pgs_per_line;
+		}
+	} else {
+		lm = &conv_ftl->lm;
+		cur_pgs_per_blk = spp->pgs_per_blk;
+		cur_pgs_per_line = spp->pgs_per_line;
+	}
+	
 
 	/* update corresponding page status */
 	pg = get_pg(conv_ftl->ssd, ppa);
@@ -702,20 +661,20 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	/* update corresponding block status */
 	blk = get_blk(conv_ftl->ssd, ppa);
 	
-	NVMEV_ASSERT(blk->ipc >= 0 && blk->ipc < spp->pgs_per_blk);
+	NVMEV_ASSERT(blk->ipc >= 0 && blk->ipc < cur_pgs_per_blk);
 	blk->ipc++;
-	NVMEV_ASSERT(blk->vpc > 0 && blk->vpc <= spp->pgs_per_blk);
+	NVMEV_ASSERT(blk->vpc > 0 && blk->vpc <= cur_pgs_per_blk);
 	blk->vpc--;
 
 	/* update corresponding line status */
 	line = get_line(conv_ftl, ppa);
-	NVMEV_ASSERT(line->ipc >= 0 && line->ipc < spp->pgs_per_line);
-	if (line->vpc == spp->pgs_per_line) {
+	NVMEV_ASSERT(line->ipc >= 0 && line->ipc < cur_pgs_per_line);
+	if (line->vpc == cur_pgs_per_line) {
 		NVMEV_ASSERT(line->ipc == 0);
 		was_full_line = true;
 	}
 	line->ipc++;
-	NVMEV_ASSERT(line->vpc > 0 && line->vpc <= spp->pgs_per_line);
+	NVMEV_ASSERT(line->vpc > 0 && line->vpc <= cur_pgs_per_line);
 	/* Adjust the position of the victime line in the pq under over-writes */
 	if (line->pos) {
 		/* Note that line->vpc will be updated by this call */
@@ -740,6 +699,23 @@ static void mark_page_valid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	struct nand_page *pg = NULL;
 	struct line *line;
 
+	int cur_pgs_per_blk;
+	int cur_pgs_per_line;
+
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		if (ppa->g.blk < spp->tt_lines_slc) {
+			cur_pgs_per_blk = spp->pgs_per_blk_slc;
+			cur_pgs_per_line = spp->pgs_per_line_slc;
+		} else {
+			cur_pgs_per_blk = spp->pgs_per_blk;
+			cur_pgs_per_line = spp->pgs_per_line;
+		}
+	} else {
+		cur_pgs_per_blk = spp->pgs_per_blk;
+		cur_pgs_per_line = spp->pgs_per_line;
+	}
+	
+
 	/* update page status */
 	pg = get_pg(conv_ftl->ssd, ppa);
 	NVMEV_ASSERT(pg->status == PG_FREE);
@@ -747,12 +723,12 @@ static void mark_page_valid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 
 	/* update corresponding block status */
 	blk = get_blk(conv_ftl->ssd, ppa);
-	NVMEV_ASSERT(blk->vpc >= 0 && blk->vpc < spp->pgs_per_blk);
+	NVMEV_ASSERT(blk->vpc >= 0 && blk->vpc < cur_pgs_per_blk);
 	blk->vpc++;
 
 	/* update corresponding line status */
 	line = get_line(conv_ftl, ppa);
-	NVMEV_ASSERT(line->vpc >= 0 && line->vpc < spp->pgs_per_line);
+	NVMEV_ASSERT(line->vpc >= 0 && line->vpc < cur_pgs_per_line);
 	line->vpc++;
 }
 
@@ -763,7 +739,18 @@ static void mark_block_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	struct nand_page *pg = NULL;
 	int i;
 
-	for (i = 0; i < spp->pgs_per_blk; i++) {
+	int cur_pgs_per_blk;
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		if (ppa->g.blk < spp->tt_lines_slc) {
+			cur_pgs_per_blk = spp->pgs_per_blk_slc;
+		} else {
+			cur_pgs_per_blk = spp->pgs_per_blk;
+		}
+	} else {
+		cur_pgs_per_blk = spp->pgs_per_blk;
+	}
+
+	for (i = 0; i < cur_pgs_per_blk; i++) {
 		/* reset page status */
 		pg = &blk->pg[i];
 		NVMEV_ASSERT(pg->nsecs == spp->secs_per_pg);
@@ -771,12 +758,14 @@ static void mark_block_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	}
 
 	/* reset block status */
-	NVMEV_ASSERT(blk->npgs == spp->pgs_per_blk);
+	NVMEV_ASSERT(blk->npgs == cur_pgs_per_blk);
 	blk->ipc = 0;
 	blk->vpc = 0;
 	blk->erase_cnt++;
 }
 
+/* read one valid page to copy somewhere */
+/* ..하는 척만 함(타이밍 모델) */
 static void gc_read_page(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
@@ -796,6 +785,7 @@ static void gc_read_page(struct conv_ftl *conv_ftl, struct ppa *ppa)
 }
 
 /* move valid page data (already in DRAM) from victim line to a new page */
+/* gc를 하든 migration을 하든 TLC 영역에 적어야 하므로 이 함수는 변경점이 없음 */
 static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
@@ -804,7 +794,9 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	uint64_t lpn = get_rmap_ent(conv_ftl, old_ppa);
 
 	NVMEV_ASSERT(valid_lpn(conv_ftl, lpn));
+
 	new_ppa = get_new_page(conv_ftl, GC_IO);
+	
 	/* update maptbl */
 	set_maptbl_ent(conv_ftl, lpn, &new_ppa);
 	/* update rmap */
@@ -879,12 +871,16 @@ static inline long long int calculate_cost_benefit_val(struct ssdparams *spp, co
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
-	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *lm;
 	struct line *victim_line = NULL;
+	int cur_pgs_per_line;
+
+	lm = &conv_ftl->lm;
+	cur_pgs_per_line = spp->pgs_per_line;
 #if defined(CB_ADVANCED) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
 	int min_idx = -1;
 	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
-	for (int i = 1; i < lm->victim_line_pq->size; i++) {
+	for (int i = 1; i < lm->victim_line_pq->size; i++) { // 1-based
 		struct line *cur_line = (struct line *) (lm->victim_line_pq->d)[i];
 		if (cur_line->ipc == 0)
 			continue;
@@ -958,7 +954,7 @@ static struct line *select_victim_line_slc(struct conv_ftl *conv_ftl, bool force
 	}
 #if defined(RD2)
 #else
-	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
+	if (!force && (victim_line->vpc > (spp->pgs_per_line_slc / 8))) {
 		// force는 강제로 시키는거같고
 		// valid page 수가 (라인(슈퍼블럭) 당 페이지) / 8 보다 크면? -> 비효율적이니까 강제 아니면 놔둬라
 		return NULL;
@@ -977,6 +973,7 @@ static struct line *select_victim_line_slc(struct conv_ftl *conv_ftl, bool force
 }
 
 /* here ppa identifies the block we want to clean */
+/* duplicated, we use only clean_one_flashpg */
 static void clean_one_block(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
@@ -1009,13 +1006,19 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	int cnt = 0, i = 0;
 	uint64_t completed_time = 0;
 	struct ppa ppa_copy = *ppa;
+	int cur_pgs_per_flashpg;
+	if (ppa->g.blk < spp->tt_lines_slc) {
+		cur_pgs_per_flashpg = spp->pgs_per_blk_slc;
+	} else {
+		cur_pgs_per_flashpg = spp->pgs_per_blk;
+	}
 
-	for (i = 0; i < spp->pgs_per_flashpg; i++) {
+	for (i = 0; i < cur_pgs_per_flashpg; i++) {
 		pg_iter = get_pg(conv_ftl->ssd, &ppa_copy);
 		/* there shouldn't be any free page in victim blocks */
 		NVMEV_ASSERT(pg_iter->status != PG_FREE);
 		if (pg_iter->status == PG_VALID) {
-			cnt++;
+			cnt++; // valid pages count
 		}
 		ppa_copy.g.pg++;
 	}
@@ -1037,13 +1040,13 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		completed_time = ssd_advance_nand(conv_ftl->ssd, &gcr);
 	}
 
-	for (i = 0; i < spp->pgs_per_flashpg; i++) {
+	for (i = 0; i < cur_pgs_per_flashpg; i++) {
 		pg_iter = get_pg(conv_ftl->ssd, &ppa_copy);
 
 		/* there shouldn't be any free page in victim blocks */
 		if (pg_iter->status == PG_VALID) {
 			/* delay the maptbl update until "write" happens */
-			gc_write_page(conv_ftl, &ppa_copy);
+			gc_write_page(conv_ftl, &ppa_copy); // ppa_copy는 기존 ppa 주소
 		}
 
 		ppa_copy.g.pg++;
@@ -1068,7 +1071,11 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 	struct ppa ppa;
 	int flashpg;
 
-	victim_line = select_victim_line(conv_ftl, force);
+	if (conv_ftl->dyn_slc_mode == SLC_MODE) {
+		victim_line = select_victim_line_slc(conv_ftl, force);
+	} else {
+		victim_line = select_victim_line(conv_ftl, force);
+	}
 	conv_ftl->gc_cnt++;
 	if (!victim_line) {
 		return -1;
@@ -1125,9 +1132,15 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 
 static void foreground_gc(struct conv_ftl *conv_ftl)
 {
-	if (should_gc_high(conv_ftl)) {
-		NVMEV_DEBUG_VERBOSE("should_gc_high passed");
+	if (should_migration_high(conv_ftl)) {
+		NVMEV_DEBUG_VERBOSE("should_migration_high passed");
 		/* perform GC here until !should_gc(conv_ftl) */
+		if (should_gc_high(conv_ftl)) {
+			NVMEV_DEBUG_VERBOSE("should_gc_high passed");
+			conv_ftl->dyn_slc_mode = TLC_MODE;
+			do_gc(conv_ftl, true);
+		}
+		conv_ftl->dyn_slc_mode = SLC_MODE;
 		do_gc(conv_ftl, true);
 	}
 }
