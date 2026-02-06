@@ -493,6 +493,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 		TODO:
 		ppa가 SLC cache 영역에 속하면 latency 값 바뀜
 		그래서 ppa로 분기 나눠서 latency값 바꿔줄 필요 있음
+		-> 다했지롱
 	*/
 	int c = ncmd->cmd;
 	uint64_t cmd_stime = (ncmd->stime == 0) ? __get_ioclock(ssd) : ncmd->stime;
@@ -516,7 +517,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	spp = &ssd->sp;
 	lun = get_lun(ssd, ppa);
 	ch = get_ch(ssd, ppa);
-	cell = get_cell(ssd, ppa);
+	cell = get_cell(ssd, ppa); // must not used by SLC cache's cell
 	remaining = ncmd->xfer_size;
 
 	switch (c) {
@@ -525,9 +526,17 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
 
 		if (ncmd->xfer_size == 4096) {
-			nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
+			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+				nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
+			} else {
+				nand_etime = nand_stime + spp->pg_4kb_rd_lat_slc;
+			}
 		} else {
-			nand_etime = nand_stime + spp->pg_rd_lat[cell];
+			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+				nand_etime = nand_stime + spp->pg_rd_lat[cell];
+			} else {
+				nand_etime = nand_stime + spp->pg_rd_lat_slc;
+			}
 		}
 
 		/* read: then data transfer through channel */
@@ -558,15 +567,23 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 
 		/* write: then do NAND program */
 		nand_stime = chnl_etime;
-		nand_etime = nand_stime + spp->pg_wr_lat;
+		if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+			nand_etime = nand_stime + spp->pg_wr_lat_slc;
+		} else {
+			nand_etime = nand_stime + spp->pg_wr_lat;
+		}
+		
 		lun->next_lun_avail_time = nand_etime;
 		completed_time = nand_etime;
 		break;
-
 	case NAND_ERASE:
 		/* erase: only need to advance NAND status */
 		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
-		nand_etime = nand_stime + spp->blk_er_lat;
+		if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+			nand_etime = nand_stime + spp->blk_er_lat_slc;
+		} else {
+			nand_etime = nand_stime + spp->blk_er_lat;
+		}
 		lun->next_lun_avail_time = nand_etime;
 		completed_time = nand_etime;
 		break;

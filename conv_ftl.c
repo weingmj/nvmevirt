@@ -742,8 +742,10 @@ static void mark_block_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	int cur_pgs_per_blk;
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (ppa->g.blk < spp->tt_lines_slc) {
+			NVMEV_ASSERT(conv_ftl->dyn_slc_mode == SLC_MODE);
 			cur_pgs_per_blk = spp->pgs_per_blk_slc;
 		} else {
+			NVMEV_ASSERT(conv_ftl->dyn_slc_mode == TLC_MODE);
 			cur_pgs_per_blk = spp->pgs_per_blk;
 		}
 	} else {
@@ -1006,19 +1008,21 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	int cnt = 0, i = 0;
 	uint64_t completed_time = 0;
 	struct ppa ppa_copy = *ppa;
-	int cur_pgs_per_flashpg;
-	if (ppa->g.blk < spp->tt_lines_slc) {
+	int cur_pgs_per_flashpg = spp->pgs_per_blk;
+	int io_type = GC_IO;
+	if (conv_ftl->slc_mode == SLC_MODE && conv_ftl->dyn_slc_mode == SLC_MODE) {
+		NVMEV_ASSERT(ppa->g.blk < spp->tt_lines_slc);
 		cur_pgs_per_flashpg = spp->pgs_per_blk_slc;
-	} else {
-		cur_pgs_per_flashpg = spp->pgs_per_blk;
+		io_type = USER_IO;
 	}
+	
 
 	for (i = 0; i < cur_pgs_per_flashpg; i++) {
 		pg_iter = get_pg(conv_ftl->ssd, &ppa_copy);
 		/* there shouldn't be any free page in victim blocks */
 		NVMEV_ASSERT(pg_iter->status != PG_FREE);
 		if (pg_iter->status == PG_VALID) {
-			cnt++; // valid pages count
+			cnt++; // counting valid pages
 		}
 		ppa_copy.g.pg++;
 	}
@@ -1028,9 +1032,23 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	if (cnt <= 0)
 		return;
 
+	/*
+		GC_IO, USER_IO 나눠보내야 하는가에 대한 간단한 고찰
+		나눠보내야 하는가
+		그렇지 않나?
+		우리가 clean_one_flashpg를 언제 사용하지? 라고 한다면
+		migration 그리고 GC 둘 중 하나에서 사용하지
+		migration을 할 때 clean_one_flashpg의 READ는 SLC Cache에서 이루어지지
+		WRITE는 TLC에 하고
+		GC를 할 때는 당연히 READ/WRITE 둘 다 TLC 영역이고
+		여기서 gcr이 내리려는 명령은 "cnt 개수의 valid page만큼 읽어라" 니까,
+		migration에서는 "SLC Cache 내의 valid page"를 읽으라는 소리가 되겠지
+		즉 GC_IO, USER_IO를 구분하는게 맞다
+	*/
+
 	if (cpp->enable_gc_delay) {
 		struct nand_cmd gcr = {
-			.type = GC_IO,
+			.type = io_type,
 			.cmd = NAND_READ,
 			.stime = 0,
 			.xfer_size = spp->pgsz * cnt,
@@ -1055,8 +1073,17 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 
 static void mark_line_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
-	struct line_mgmt *lm = &conv_ftl->lm;
+	struct line_mgmt *lm;
 	struct line *line = get_line(conv_ftl, ppa);
+	if (conv_ftl->slc_mode) {
+		if (ppa->g.blk < conv_ftl->ssd->sp.tt_lines_slc) {
+			lm = &conv_ftl->slm;
+		} else {
+			lm = &conv_ftl->lm;
+		}
+	} else {
+		lm = &conv_ftl->lm;
+	}
 	line->ipc = 0;
 	line->vpc = 0;
 	/* move this line to free line list */
@@ -1070,11 +1097,17 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct ppa ppa;
 	int flashpg;
+	int cur_flashpgs_per_blk;
+	int io_type;
 
 	if (conv_ftl->dyn_slc_mode == SLC_MODE) {
 		victim_line = select_victim_line_slc(conv_ftl, force);
+		cur_flashpgs_per_blk = spp->flashpgs_per_blk_slc;
+		io_type = USER_IO;
 	} else {
 		victim_line = select_victim_line(conv_ftl, force);
+		cur_flashpgs_per_blk = spp->flashpgs_per_blk;
+		io_type = GC_IO;
 	}
 	conv_ftl->gc_cnt++;
 	if (!victim_line) {
@@ -1089,7 +1122,7 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 	conv_ftl->wfc.credits_to_refill = victim_line->ipc;
 
 	/* copy back valid data */
-	for (flashpg = 0; flashpg < spp->flashpgs_per_blk; flashpg++) {
+	for (flashpg = 0; flashpg < cur_flashpgs_per_blk; flashpg++) {
 		int ch, lun;
 		ppa.g.pg = flashpg * spp->pgs_per_flashpg;
 		for (ch = 0; ch < spp->nchs; ch++) {
@@ -1102,14 +1135,23 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 				lunp = get_lun(conv_ftl->ssd, &ppa);
 				clean_one_flashpg(conv_ftl, &ppa);
 
-				if (flashpg == (spp->flashpgs_per_blk - 1)) {
+				if (flashpg == (cur_flashpgs_per_blk - 1)) {
 					struct convparams *cpp = &conv_ftl->cp;
 
 					mark_block_free(conv_ftl, &ppa);
 
+					/*
+						GC_IO, USER_IO 나눠보내야 하는가에 대한 간단한 고찰
+						여기서 내리려는 명령은 erase 명령이다
+						어디에 대한?
+						모든 블럭에 대해서.
+						즉 victim line 내 모든 블럭 각각에 대한 erase 명령이다
+						이 말은 erase 명령이 어느 영역에 이루어질지 모른다는 소리다
+						따라서 io_type을 구분할 필요가 있다
+					*/
 					if (cpp->enable_gc_delay) {
 						struct nand_cmd gce = {
-							.type = GC_IO,
+							.type = io_type,
 							.cmd = NAND_ERASE,
 							.stime = 0,
 							.interleave_pci_dma = false,
@@ -1135,6 +1177,7 @@ static void foreground_gc(struct conv_ftl *conv_ftl)
 	if (should_migration_high(conv_ftl)) {
 		NVMEV_DEBUG_VERBOSE("should_migration_high passed");
 		/* perform GC here until !should_gc(conv_ftl) */
+		/* there must free line in TLC before migration */
 		if (should_gc_high(conv_ftl)) {
 			NVMEV_DEBUG_VERBOSE("should_gc_high passed");
 			conv_ftl->dyn_slc_mode = TLC_MODE;
@@ -1173,6 +1216,19 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	uint32_t nr_parts = ns->nr_parts;
 
 	struct ppa prev_ppa;
+	/*
+		srd에서 USER_IO와 GC_IO를 구분할 필요가 있는가에 대한 간단한 고찰
+		srd로는 READ request를 보내게 된다
+		어디를 읽을지는 ppa로 알게 되지
+		ppa로 구분이 가능하기도 함
+		근데 USER_IO, GC_IO로 구분을 미리 할 수 있는가? 하면
+		ppa를 알게 된 시점에서 가능하지
+		GC_IO라는게 뭐지?
+		내가 srd를 GC_IO로 바꾸면 side effect가 없나?
+		ssd_advance_nand 에서, READ할 때 io_type이 어떻게 쓰이는지 보자
+		-> 아예 안쓰이는데?
+		-> 굳이 바꾸지 말자
+	*/
 	struct nand_cmd srd = {
 		.type = USER_IO,
 		.cmd = NAND_READ,
@@ -1201,6 +1257,7 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 
 		/* normal IO read path */
 		// wei edit : read하는 영역이 SLC 영역인지, TLC 영역인지 구분해서 시간 계산해야 함
+		// -> 이건 ssd.c에서 할 일, 여기선 ppa만 srd에 숨겨서 넘겨주고 ssd_advance_nand에서 판단
 		// page 단위기 때문에 읽는 행위 자체는 바뀌는 것이 없음
 		for (lpn = start_lpn; lpn <= end_lpn; lpn += nr_parts) {
 			uint64_t local_lpn;
@@ -1220,12 +1277,12 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 			if (mapped_ppa(&prev_ppa) &&
 			    is_same_flash_page(conv_ftl, cur_ppa, prev_ppa)) {
 				xfer_size += spp->pgsz;
-				continue;
+				continue; // 다음 읽기에 짬 때림
 			}
 
 			if (xfer_size > 0) {
 				srd.xfer_size = xfer_size;
-				srd.ppa = &prev_ppa;
+				srd.ppa = &prev_ppa; // 읽으려는 ppa가 여기서 정해짐
 				nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 				nsecs_latest = max(nsecs_completed, nsecs_latest);
 			}
@@ -1237,7 +1294,7 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 		// issue remaining io
 		if (xfer_size > 0) {
 			srd.xfer_size = xfer_size;
-			srd.ppa = &prev_ppa;
+			srd.ppa = &prev_ppa; // 읽으려는 ppa가 여기서 정해짐2
 			nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
 			nsecs_latest = max(nsecs_completed, nsecs_latest);
 		}
@@ -1270,6 +1327,12 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 	uint64_t nsecs_xfer_completed;
 	uint32_t allocated_buf_size;
 
+	/*
+		TODO:
+		xfer_size는 당연히 달라질거고
+		USER_IO, GC_IO 달라져야 하는지 판단해봐야 함
+		판단은 ppa로 하겠지?
+	*/
 	struct nand_cmd swr = { // 유저 요청으로, write를 하고, DMA(Direct Memory Access)는 안하며, 원샷 페이지만큼 전송하라는 커맨드
 		.type = USER_IO,
 		.cmd = NAND_WRITE,
