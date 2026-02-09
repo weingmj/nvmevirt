@@ -251,7 +251,7 @@ static inline void check_addr(int a, int max)
 static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 {
 	struct line_mgmt *lm;
-	if (conv_ftl->dyn_slc_mode == SLC_MODE) {
+	if (conv_ftl->slc_mode == SLC_MODE && conv_ftl->dyn_slc_mode == SLC_MODE) {
 		lm = &conv_ftl->slm;
 	} else {
 		lm = &conv_ftl->lm;
@@ -285,7 +285,7 @@ static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 {
 	struct write_pointer *wp = __get_wp(conv_ftl, io_type);
 
-	if (io_type == USER_IO) {
+	if (conv_ftl->slc_mode == SLC_MODE && io_type == USER_IO) {
 		conv_ftl->dyn_slc_mode = SLC_MODE;
 	} else if (io_type == GC_IO) {
 		conv_ftl->dyn_slc_mode = TLC_MODE;
@@ -1183,8 +1183,10 @@ static void foreground_gc(struct conv_ftl *conv_ftl)
 			conv_ftl->dyn_slc_mode = TLC_MODE;
 			do_gc(conv_ftl, true);
 		}
-		conv_ftl->dyn_slc_mode = SLC_MODE;
-		do_gc(conv_ftl, true);
+		if (conv_ftl->slc_mode == SLC_MODE) {
+			conv_ftl->dyn_slc_mode = SLC_MODE;
+			do_gc(conv_ftl, true);
+		}
 	}
 }
 
@@ -1391,7 +1393,7 @@ static bool conv_write(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 
 		/* Aggregate write io in flash page */
 		if (conv_ftl->slc_mode == SLC_MODE) {
-			advance_write_pointer_slc(conv_ftl, USER_IO);
+			advance_write_pointer(conv_ftl, USER_IO);
 			if (last_pg_in_wordline_slc(conv_ftl, &ppa)) { // 한 라인을 다 모았니?
 				swr.ppa = &ppa;
 

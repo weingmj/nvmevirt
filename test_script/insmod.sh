@@ -9,16 +9,16 @@ if [ ! -f "./nvmev.ko" ]; then
 fi
 
 # set address with computer-name
-if [ "$MY_NAME" == "weicom" ]; then
-#desktop
+if [ "$MY_NAME" == "research-pc" ]; then
+#research-pc
     START_ADDR="4G"
-    SIZE="3G"
-    echo ">> [Desktop Mode]: Start=4G, Size=3G"
+    SIZE="12G"
+    echo ">> [research-pc Mode]: Start=4G, Size=12G"
 else
-#notebook
+#notebook, desktop, etc
     START_ADDR="4G"
     SIZE="3G"
-    echo ">> [Laptop Mode]: Start=4G, Size=3G"
+    echo ">> [Default Mode]: Start=4G, Size=3G"
 fi
 
 # to reload, remove existing module
@@ -34,7 +34,6 @@ sudo insmod ./nvmev.ko memmap_start=$START_ADDR memmap_size=$SIZE cpus=1,2
 # result
 if [ $? -eq 0 ]; then
     echo "Success"
-    sudo dmesg | tail -n 2
 else
     echo "Failed"
 fi
