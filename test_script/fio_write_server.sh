@@ -26,6 +26,13 @@ size=10G
 numjobs=1
 time_based=0
 
+[cold_invaliding]
+stonewall
+rw=randwrite
+size=9G
+io_size=1G
+numjobs=1
+
 [cold_data]
 stonewall
 size=9G

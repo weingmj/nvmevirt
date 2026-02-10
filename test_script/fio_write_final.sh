@@ -1,18 +1,16 @@
 #!/bin/sh
 
-TARGET_DEV=/dev/nvme0n1
+TARGET_PATH=/home/wei/chlab/nvmevirt/test_script/mnt
 
-echo "Starting Synchronized Hot/Cold Test..."
+echo "Starting Synchronized Hot/Cold Test (Scaled 9:1 Ratio)..."
 
-# 바뀔 수 있는 파라미터 목록
-# time_based & runtime은 묶임 (1, true로 설정하면 runtime 지정 필요)
-# size / rate_iops
-# 나는 600M / 2100M(합 2.7G) 정도로 hot / cold 나눔
-# 디스크 총 크기는 3G로 잡았음
+# [비율 유지 스케일링]
+# Server: Cold 9G : Hot 1G (Total 10G used on 12G disk)
+# Local : Cold 2.25G : Hot 0.25G (Total 2.5G used on 3G disk)
 
 sudo fio - <<EOF
 [global]
-filename=/dev/nvme0n1
+directory=$TARGET_PATH
 ioengine=libaio
 direct=1
 bs=4k
@@ -22,22 +20,31 @@ norandommap=1
 
 [prepare_fill]
 rw=write
+offset=0
 size=2700M
 numjobs=1
 time_based=0
 
+[cold_invaliding]
+stonewall
+rw=randwrite
+offset=0
+size=2500M
+io_size=250M
+numjobs=1
+
 [cold_data]
 stonewall
-size=2100M
+size=2500M
 offset=0
-rate_iops=100
+rate_iops=50
 time_based=1
 runtime=300
 
 [hot_data]
-size=600M
-offset=2100M
-rate_iops=2000
+size=200M
+offset=2500M
+rate_iops=3000
 time_based=1
 runtime=300
 EOF
