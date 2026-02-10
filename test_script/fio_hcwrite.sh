@@ -1,6 +1,13 @@
 #!/bin/sh
 
-sudo fio --filename=/dev/nvme0n1 \
+MY_NAME=$(hostname)
+if [ "$MY_NAME" = "research-pc" ]; then
+    TARGET_PATH=/home/wei/nvmevirt/test_script/mnt
+else
+    TARGET_PATH=/home/wei/chlab/nvmevirt/test_script/mnt
+fi
+
+sudo fio --directory=$TARGET_PATH \
     --direct=1 \
     --ioengine=libaio \
     --rw=randwrite \

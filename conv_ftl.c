@@ -866,17 +866,17 @@ static inline int age_levelize(long long int age_us) {
 	if (age_us < US(5)) {
 		return 1;
 	} else if (age_us < US(10)) {
-		return 4;
+		return 5;
 	} else if (age_us < US(25)) {
 		return 10;
 	} else if (age_us < US(50)) {
-		return 25;
+		return 20;
 	} else if (age_us < US(100)) {
-		return 50;
-	} else if (age_us < US(150)) {
-		return 70;
+		return 40;
+	} else if (age_us < US(200)) {
+		return 80;
 	} else {
-		return 100;
+		return 250;
 	}
 }
 
@@ -942,9 +942,11 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 #endif
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
-	if (victim_line->id < conv_ftl->ssd->sp.tt_lines * 10 / 100) {
+	if (victim_line->id < conv_ftl->ssd->sp.tt_lines * 90 / 100) {
+		NVMEV_INFO("Age: %lld, VPC/IPC: %d/%d", (ktime_get_ns() - victim_line->mtime) / 1000000000, victim_line->vpc, victim_line->ipc);
 		conv_ftl->cold_cnt++;
 	} else {
+		NVMEV_INFO("Age: %lld, VPC/IPC: %d/%d", (ktime_get_ns() - victim_line->mtime) / 1000000000, victim_line->vpc, victim_line->ipc);
 		conv_ftl->hot_cnt++;
 	}
 

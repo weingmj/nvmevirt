@@ -1,6 +1,8 @@
 #!/bin/sh
 
-sudo fio --filename=/dev/nvme0n1 \
+TARGET_PATH=/home/wei/chlab/nvmevirt/test_script/mnt
+
+sudo fio --directory=$TARGET_PATH \
     --direct=1 \
     --ioengine=libaio \
     --rw=randwrite \

@@ -1,6 +1,12 @@
 #!/bin/sh
 
-TARGET_DEV=/dev/nvme1n1
+MY_NAME=$(hostname)
+if [ "$MY_NAME" = "research-pc" ]; then
+    TARGET_PATH=/home/wei/nvmevirt/test_script/mnt
+else
+    TARGET_PATH=/home/wei/chlab/nvmevirt/test_script/mnt
+fi
+
 
 echo "Starting Synchronized Hot/Cold Test..."
 
@@ -12,7 +18,8 @@ echo "Starting Synchronized Hot/Cold Test..."
 
 sudo fio - <<EOF
 [global]
-filename=/dev/nvme1n1
+directory=$TARGET_PATH
+filename=fiotest.dat
 ioengine=libaio
 direct=1
 bs=4k
