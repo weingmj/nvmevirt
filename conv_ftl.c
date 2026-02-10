@@ -863,17 +863,17 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 
 #define US(a) (a * 1000 * 1000)
 static inline int age_levelize(long long int age_us) {
-	if (age_us < US(10)) {
+	if (age_us < US(5)) {
 		return 1;
-	} else if (age_us < US(20)) {
+	} else if (age_us < US(10)) {
 		return 4;
-	} else if (age_us < US(45)) {
+	} else if (age_us < US(25)) {
 		return 10;
-	} else if (age_us < US(80)) {
+	} else if (age_us < US(50)) {
 		return 25;
-	} else if (age_us < US(150)) {
+	} else if (age_us < US(100)) {
 		return 50;
-	} else if (age_us < US(300)) {
+	} else if (age_us < US(150)) {
 		return 70;
 	} else {
 		return 100;
@@ -942,6 +942,11 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 #endif
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
+	if (victim_line->id < conv_ftl->ssd->sp.tt_lines * 10 / 100) {
+		conv_ftl->cold_cnt++;
+	} else {
+		conv_ftl->hot_cnt++;
+	}
 
 	/* victim_line is a danggling node now */
 	return victim_line;
@@ -1467,12 +1472,14 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 	}
 
 	NVMEV_DEBUG_VERBOSE("%s: latency=%llu\n", __func__, latest - start);
-	uint64_t gc_cnts = 0, copy_cnts = 0;
+	uint64_t gc_cnts = 0, copy_cnts = 0, hot_cnts = 0, cold_cnts = 0;
 	for (i = 0; i < ns->nr_parts; i++) {
 		gc_cnts += conv_ftls[i].gc_cnt;
 		copy_cnts += conv_ftls[i].copy_cnt;
+		hot_cnts += conv_ftls[i].hot_cnt;
+		cold_cnts += conv_ftls[i].cold_cnt;
 	}
-	NVMEV_INFO("total gc: %llu, total copy: %llu", gc_cnts, copy_cnts);
+	NVMEV_INFO("total gc: %llu, total copy: %llu, hot_copy: %llu, cold_copy: %llu", gc_cnts, copy_cnts, hot_cnts, cold_cnts);
 	ret->status = NVME_SC_SUCCESS;
 	ret->nsecs_target = latest;
 	return;

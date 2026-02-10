@@ -1,6 +1,6 @@
 #!/bin/sh
 
-TARGET_DEV=/dev/nvme0n1
+TARGET_DEV=/dev/nvme1n1
 
 echo "Starting Synchronized Hot/Cold Test..."
 
@@ -12,7 +12,7 @@ echo "Starting Synchronized Hot/Cold Test..."
 
 sudo fio - <<EOF
 [global]
-filename=/dev/nvme0n1
+filename=/dev/nvme1n1
 ioengine=libaio
 direct=1
 bs=4k
@@ -22,22 +22,22 @@ norandommap=1
 
 [prepare_fill]
 rw=write
-size=2700M
+size=10G
 numjobs=1
 time_based=0
 
 [cold_data]
 stonewall
-size=2100M
+size=9G
 offset=0
-rate_iops=100
+rate_iops=300
 time_based=1
 runtime=300
 
 [hot_data]
-size=600M
-offset=2100M
-rate_iops=2000
+size=1G
+offset=9G
+rate_iops=10000
 time_based=1
 runtime=300
 EOF
