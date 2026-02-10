@@ -12,25 +12,32 @@ echo "Starting Synchronized Hot/Cold Test..."
 
 sudo fio - <<EOF
 [global]
-filename=$TARGET_DEV
-direct=1
+filename=/dev/nvme0n1
 ioengine=libaio
+direct=1
 bs=4k
+group_reporting
 rw=randwrite
 norandommap=1
-randrepeat=0
+
+[prepare_fill]
+rw=write
+size=2700M
 numjobs=1
-group_reporting
-time_based=1
-runtime=120
+time_based=0
 
-[hot_job]
-offset=0
-size=600M
-rate_iops=8000
-
-[cold_job]
-offset=600M
+[cold_data]
+stonewall
 size=2100M
-rate_iops=500
+offset=0
+rate_iops=100
+time_based=1
+runtime=300
+
+[hot_data]
+size=600M
+offset=2100M
+rate_iops=2000
+time_based=1
+runtime=600
 EOF

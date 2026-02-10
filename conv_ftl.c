@@ -161,10 +161,17 @@ static void init_lines(struct conv_ftl *conv_ftl)
 
 	INIT_LIST_HEAD(&lm->free_line_list);
 	INIT_LIST_HEAD(&lm->full_line_list);
-
-	lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
-					 victim_line_set_pri, victim_line_get_pos,
-					 victim_line_set_pos);
+	
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		lm->victim_line_pq = pqueue_init(spp->tt_lines_tlc, victim_line_cmp_pri, victim_line_get_pri,
+				victim_line_set_pri, victim_line_get_pos,
+				victim_line_set_pos);
+	} else {
+		lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+				victim_line_set_pri, victim_line_get_pos,
+				victim_line_set_pos);
+	}
+	
 
 	lm->free_line_cnt = 0;
 
@@ -289,6 +296,8 @@ static void prepare_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 		conv_ftl->dyn_slc_mode = SLC_MODE;
 	} else if (io_type == GC_IO) {
 		conv_ftl->dyn_slc_mode = TLC_MODE;
+	} else {
+		conv_ftl->dyn_slc_mode = TLC_MODE;
 	}
 
 	struct line *curline = get_next_free_line(conv_ftl);
@@ -316,18 +325,23 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	int cur_pgs_per_oneshotpg = 0;
 	int cur_pgs_per_line = 0;
 	
-	if (io_type == GC_IO && conv_ftl->dyn_slc_mode == TLC_MODE) {
+	if (conv_ftl->slc_mode == SLC_MODE) {
+		if (io_type == GC_IO) {
+			lm = &conv_ftl->lm;
+			cur_pgs_per_blk = spp->pgs_per_blk;
+			cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg;
+			cur_pgs_per_line = spp->pgs_per_line;
+		} else if (io_type == USER_IO) {
+			lm = &conv_ftl->slm;
+			cur_pgs_per_blk = spp->pgs_per_blk_slc;
+			cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg_slc;
+			cur_pgs_per_line = spp->pgs_per_line_slc;
+		} 
+	} else {
 		lm = &conv_ftl->lm;
 		cur_pgs_per_blk = spp->pgs_per_blk;
 		cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg;
 		cur_pgs_per_line = spp->pgs_per_line;
-	} else if (io_type == USER_IO && conv_ftl->dyn_slc_mode == SLC_MODE) {
-		lm = &conv_ftl->slm;
-		cur_pgs_per_blk = spp->pgs_per_blk_slc;
-		cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg_slc;
-		cur_pgs_per_line = spp->pgs_per_line_slc;
-	} else {
-		NVMEV_ERROR("io_type : %d, dyn_slc_mode : %d\n", io_type, conv_ftl->dyn_slc_mode);
 	}
 
 	NVMEV_DEBUG_VERBOSE("current wpp: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n",
@@ -370,6 +384,9 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < cur_pgs_per_line);
 		/* there must be some invalid pages in this line */
 		NVMEV_ASSERT(wpp->curline->ipc > 0);
+		if (wpp->curline->vpc + wpp->curline->ipc != cur_pgs_per_line)
+			NVMEV_INFO("vpc: %d, ipc: %d, total: %d", wpp->curline->vpc, wpp->curline->ipc, cur_pgs_per_line);
+		NVMEV_ASSERT(wpp->curline->vpc + wpp->curline->ipc == cur_pgs_per_line);
 		pqueue_insert(lm->victim_line_pq, wpp->curline);
 		lm->victim_line_cnt++;
 	}
@@ -447,6 +464,11 @@ static void conv_init_ftl(struct conv_ftl *conv_ftl, struct convparams *cpp, str
 	conv_ftl->cp = *cpp;
 
 	conv_ftl->ssd = ssd;
+	if (ENABLE_SLC_CACHE) {
+		conv_ftl->slc_mode = SLC_MODE;
+	} else {
+		conv_ftl->slc_mode = TLC_MODE;
+	}
 
 	/* initialize maptbl */
 	init_maptbl(conv_ftl); // mapping table
@@ -509,7 +531,6 @@ void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *
 	conv_ftls = kmalloc(sizeof(struct conv_ftl) * nr_parts, GFP_KERNEL);
 
 	for (i = 0; i < nr_parts; i++) {
-		conv_ftls[i].slc_mode = ENABLE_SLC_CACHE;
 		ssd = kmalloc(sizeof(struct ssd), GFP_KERNEL);
 		ssd_init(ssd, &spp, cpu_nr_dispatcher);
 		conv_init_ftl(&conv_ftls[i], &cpp, ssd);
@@ -520,7 +541,6 @@ void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *
 		kfree(conv_ftls[i].ssd->pcie->perf_model);
 		kfree(conv_ftls[i].ssd->pcie);
 		kfree(conv_ftls[i].ssd->write_buffer);
-
 		conv_ftls[i].ssd->pcie = conv_ftls[0].ssd->pcie;
 		conv_ftls[i].ssd->write_buffer = conv_ftls[0].ssd->write_buffer;
 	}
@@ -687,6 +707,9 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		/* move line: "full" -> "victim" */
 		list_del_init(&line->entry);
 		lm->full_line_cnt--;
+		if (line->vpc + line->ipc != cur_pgs_per_line)
+			NVMEV_INFO("vpc: %d, ipc: %d, total: %d", line->vpc, line->ipc, cur_pgs_per_line);
+		NVMEV_ASSERT(line->vpc + line->ipc == cur_pgs_per_line);
 		pqueue_insert(lm->victim_line_pq, line);
 		lm->victim_line_cnt++;
 	}
@@ -843,17 +866,17 @@ static inline int age_levelize(long long int age_us) {
 	if (age_us < US(10)) {
 		return 1;
 	} else if (age_us < US(20)) {
-		return 2;
-	} else if (age_us < US(45)) {
-		return 3;
-	} else if (age_us < US(80)) {
 		return 4;
+	} else if (age_us < US(45)) {
+		return 10;
+	} else if (age_us < US(80)) {
+		return 25;
 	} else if (age_us < US(150)) {
-		return 5;
+		return 50;
 	} else if (age_us < US(300)) {
-		return 6;
+		return 70;
 	} else {
-		return 7;
+		return 100;
 	}
 }
 
@@ -879,7 +902,7 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 
 	lm = &conv_ftl->lm;
 	cur_pgs_per_line = spp->pgs_per_line;
-#if defined(CB_ADVANCED) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
+#if defined(CB) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
 	int min_idx = -1;
 	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
 	for (int i = 1; i < lm->victim_line_pq->size; i++) { // 1-based
@@ -904,7 +927,7 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 	if (!victim_line) {
 		return NULL;
 	}
-#if defined(RD) || defined(CB_ADVANCED)
+#if defined(RD) || defined(CB)
 #else
 	if (!force && (victim_line->vpc > (spp->pgs_per_line / 8))) {
 		// force는 강제로 시키는거같고
@@ -912,7 +935,7 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 		return NULL;
 	}
 #endif
-#if defined(CB) || defined(RD) || defined(CB_ADVANCED)
+#if defined(CB) || defined(RD)
 	pqueue_remove(lm->victim_line_pq, victim_line);
 #else
 	pqueue_pop(lm->victim_line_pq);
@@ -929,7 +952,7 @@ static struct line *select_victim_line_slc(struct conv_ftl *conv_ftl, bool force
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct line_mgmt *slm = &conv_ftl->slm;
 	struct line *victim_line = NULL;
-#if defined(CB_ADVANCED2) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
+#if defined(CB2) // cost-benefit with optimization using pqueue's array instead of looking-around all lines
 	int min_idx = -1;
 	long long int cb_min = __LONG_LONG_MAX__, cur_cbval;
 	for (int i = 1; i < slm->victim_line_pq->size; i++) {
@@ -962,7 +985,7 @@ static struct line *select_victim_line_slc(struct conv_ftl *conv_ftl, bool force
 		return NULL;
 	}
 #endif
-#if defined(RD2) || defined(CB_ADVANCED2)
+#if defined(RD2) || defined(CB2)
 	pqueue_remove(slm->victim_line_pq, victim_line);
 #else
 	pqueue_pop(slm->victim_line_pq);
@@ -1008,7 +1031,7 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	int cnt = 0, i = 0;
 	uint64_t completed_time = 0;
 	struct ppa ppa_copy = *ppa;
-	int cur_pgs_per_flashpg = spp->pgs_per_blk;
+	int cur_pgs_per_flashpg = spp->pgs_per_flashpg;
 	int io_type = GC_IO;
 	if (conv_ftl->slc_mode == SLC_MODE && conv_ftl->dyn_slc_mode == SLC_MODE) {
 		NVMEV_ASSERT(ppa->g.blk < spp->tt_lines_slc);
@@ -1016,7 +1039,6 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		io_type = USER_IO;
 	}
 	
-
 	for (i = 0; i < cur_pgs_per_flashpg; i++) {
 		pg_iter = get_pg(conv_ftl->ssd, &ppa_copy);
 		/* there shouldn't be any free page in victim blocks */
