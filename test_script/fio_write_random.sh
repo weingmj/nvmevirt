@@ -7,9 +7,11 @@ sudo fio --directory=$TARGET_PATH \
     --ioengine=libaio \
     --rw=randwrite \
     --bs=4k \
-    --size=2800M \
-    --io_size=5G \
+    --size=2700M \
+    --time_based=1 \
+    --runtime=300 \
+    --rate_iops=4000 \
     --numjobs=1 \
     --norandommap=1 \
     --randrepeat=0 \
-    --name true_random_fragmentation
+    --name random

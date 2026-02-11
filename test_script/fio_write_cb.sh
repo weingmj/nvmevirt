@@ -9,10 +9,6 @@ fi
 
 echo "Starting Synchronized Hot/Cold Test..."
 
-# [비율 유지 스케일링]
-# Server: Cold 9G : Hot 1G (Total 10G used on 12G disk)
-# Local : Cold 2.25G : Hot 0.25G (Total 2.5G used on 3G disk)
-
 sudo fio - <<EOF
 [global]
 directory=$TARGET_PATH

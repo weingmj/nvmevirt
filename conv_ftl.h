@@ -78,8 +78,7 @@ struct conv_ftl {
 	/* assign#1 */
 	uint64_t gc_cnt;
 	uint64_t copy_cnt;
-	uint64_t hot_cnt;
-	uint64_t cold_cnt;
+	uint32_t age_cnt[201];
 
 	/* assign#2 */
 	struct line_mgmt slm;

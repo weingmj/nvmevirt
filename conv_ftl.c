@@ -336,7 +336,7 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 			cur_pgs_per_blk = spp->pgs_per_blk_slc;
 			cur_pgs_per_oneshotpg = spp->pgs_per_oneshotpg_slc;
 			cur_pgs_per_line = spp->pgs_per_line_slc;
-		} 
+		}
 	} else {
 		lm = &conv_ftl->lm;
 		cur_pgs_per_blk = spp->pgs_per_blk;
@@ -942,13 +942,12 @@ static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 #endif
 	victim_line->pos = 0;
 	lm->victim_line_cnt--;
-	if (victim_line->id < conv_ftl->ssd->sp.tt_lines * 90 / 100) {
-		NVMEV_INFO("Age: %lld, VPC/IPC: %d/%d", (ktime_get_ns() - victim_line->mtime) / 1000000000, victim_line->vpc, victim_line->ipc);
-		conv_ftl->cold_cnt++;
-	} else {
-		NVMEV_INFO("Age: %lld, VPC/IPC: %d/%d", (ktime_get_ns() - victim_line->mtime) / 1000000000, victim_line->vpc, victim_line->ipc);
-		conv_ftl->hot_cnt++;
-	}
+	uint64_t age = (ktime_get_ns() - victim_line->mtime) / 1000000000;
+	NVMEV_INFO("Age: %llu, VPC/IPC: %d/%d", age, victim_line->vpc, victim_line->ipc);
+	if (age < 200)
+		conv_ftl->age_cnt[age]++;
+	else
+		conv_ftl->age_cnt[200]++;
 
 	/* victim_line is a danggling node now */
 	return victim_line;
@@ -1474,14 +1473,21 @@ static void conv_flush(struct nvmev_ns *ns, struct nvmev_request *req, struct nv
 	}
 
 	NVMEV_DEBUG_VERBOSE("%s: latency=%llu\n", __func__, latest - start);
-	uint64_t gc_cnts = 0, copy_cnts = 0, hot_cnts = 0, cold_cnts = 0;
+	uint64_t gc_cnts = 0, copy_cnts = 0;
+	uint32_t age_cnts[201];
 	for (i = 0; i < ns->nr_parts; i++) {
 		gc_cnts += conv_ftls[i].gc_cnt;
 		copy_cnts += conv_ftls[i].copy_cnt;
-		hot_cnts += conv_ftls[i].hot_cnt;
-		cold_cnts += conv_ftls[i].cold_cnt;
+		for (int j = 0; j < 201; j++) {
+			age_cnts[j] += conv_ftls[i].age_cnt[j];
+		}
 	}
-	NVMEV_INFO("total gc: %llu, total copy: %llu, hot_copy: %llu, cold_copy: %llu", gc_cnts, copy_cnts, hot_cnts, cold_cnts);
+	NVMEV_INFO("total gc: %llu, total copy: %llu", gc_cnts, copy_cnts);
+	for (i = 0; i < 201; i++) {
+		if (age_cnts[i] > 0) {
+			NVMEV_INFO("Age %d's copy: %d", i, age_cnts[i]);
+		}
+	}
 	ret->status = NVME_SC_SUCCESS;
 	ret->nsecs_target = latest;
 	return;
