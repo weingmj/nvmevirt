@@ -35,7 +35,6 @@ enum {
 enum {
 	USER_IO = 0,
 	GC_IO = 1,
-	MIG_IO = 2,
 };
 
 enum {

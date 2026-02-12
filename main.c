@@ -533,8 +533,10 @@ static void NVMEV_NAMESPACE_INIT(struct nvmev_dev *nvmev_vdev)
 
 		if (NS_SSD_TYPE(i) == SSD_TYPE_NVM)
 			simple_init_namespace(&ns[i], i, size, ns_addr, disp_no);
-		else if (NS_SSD_TYPE(i) == SSD_TYPE_CONV)
+		else if (NS_SSD_TYPE(i) == SSD_TYPE_CONV) {
 			conv_init_namespace(&ns[i], i, size, ns_addr, disp_no);
+			ns[i].size = ((100 - SLC_PORTION) * size + SLC_PORTION * size / 3) / 100;
+		}
 		else if (NS_SSD_TYPE(i) == SSD_TYPE_ZNS)
 			zns_init_namespace(&ns[i], i, size, ns_addr, disp_no);
 		else if (NS_SSD_TYPE(i) == SSD_TYPE_KV)

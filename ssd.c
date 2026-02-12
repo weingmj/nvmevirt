@@ -329,6 +329,20 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
 	blk->wp = 0;
 }
 
+static void ssd_init_nand_blk_slc(struct nand_block *blk, struct ssdparams *spp)
+{
+	int i;
+	blk->npgs = spp->pgs_per_blk_slc;
+	blk->pg = kmalloc(sizeof(struct nand_page) * blk->npgs, GFP_KERNEL);
+	for (i = 0; i < blk->npgs; i++) {
+		ssd_init_nand_page(&blk->pg[i], spp);
+	}
+	blk->ipc = 0;
+	blk->vpc = 0;
+	blk->erase_cnt = 0;
+	blk->wp = 0;
+}
+
 static void ssd_remove_nand_blk(struct nand_block *blk)
 {
 	int i;
@@ -345,7 +359,11 @@ static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
 	pl->nblks = spp->blks_per_pl;
 	pl->blk = kmalloc(sizeof(struct nand_block) * pl->nblks, GFP_KERNEL);
 	for (i = 0; i < pl->nblks; i++) {
-		ssd_init_nand_blk(&pl->blk[i], spp);
+		if (i < spp->tt_lines_slc) {
+			ssd_init_nand_blk_slc(&pl->blk[i], spp);
+		} else {
+			ssd_init_nand_blk(&pl->blk[i], spp);
+		}
 	}
 }
 
@@ -526,16 +544,24 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
 
 		if (ncmd->xfer_size == 4096) {
-			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
-				nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
+			if (ENABLE_SLC_CACHE) {
+				if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+					nand_etime = nand_stime + spp->pg_4kb_rd_lat_slc;
+				} else {
+					nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
+				}
 			} else {
-				nand_etime = nand_stime + spp->pg_4kb_rd_lat_slc;
+				nand_etime = nand_stime + spp->pg_4kb_rd_lat[cell];
 			}
 		} else {
-			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
-				nand_etime = nand_stime + spp->pg_rd_lat[cell];
+			if (ENABLE_SLC_CACHE) {
+				if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+					nand_etime = nand_stime + spp->pg_rd_lat_slc;
+				} else {
+					nand_etime = nand_stime + spp->pg_rd_lat[cell];
+				}
 			} else {
-				nand_etime = nand_stime + spp->pg_rd_lat_slc;
+				nand_etime = nand_stime + spp->pg_rd_lat[cell];
 			}
 		}
 
@@ -567,8 +593,12 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 
 		/* write: then do NAND program */
 		nand_stime = chnl_etime;
-		if (ppa->g.blk < ssd->sp.tt_lines_slc) {
-			nand_etime = nand_stime + spp->pg_wr_lat_slc;
+		if (ENABLE_SLC_CACHE) {
+			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+				nand_etime = nand_stime + spp->pg_wr_lat_slc;
+			} else {
+				nand_etime = nand_stime + spp->pg_wr_lat;
+			}
 		} else {
 			nand_etime = nand_stime + spp->pg_wr_lat;
 		}
@@ -579,8 +609,12 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	case NAND_ERASE:
 		/* erase: only need to advance NAND status */
 		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
-		if (ppa->g.blk < ssd->sp.tt_lines_slc) {
-			nand_etime = nand_stime + spp->blk_er_lat_slc;
+		if (ENABLE_SLC_CACHE) {
+			if (ppa->g.blk < ssd->sp.tt_lines_slc) {
+				nand_etime = nand_stime + spp->blk_er_lat_slc;
+			} else {
+				nand_etime = nand_stime + spp->blk_er_lat;
+			}
 		} else {
 			nand_etime = nand_stime + spp->blk_er_lat;
 		}

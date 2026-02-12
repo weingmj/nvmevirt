@@ -36,12 +36,12 @@ static inline bool should_gc_high(struct conv_ftl *conv_ftl)
 
 static bool should_migration(struct conv_ftl *conv_ftl)
 {
-	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.gc_thres_lines);
+	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.mig_thres_lines);
 }
 
 static bool should_migration_high(struct conv_ftl *conv_ftl)
 {
-	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.gc_thres_lines_high);
+	return (conv_ftl->slm.free_line_cnt <= conv_ftl->cp.mig_thres_lines_high);
 }
 
 static inline struct ppa get_maptbl_ent(struct conv_ftl *conv_ftl, uint64_t lpn)
@@ -60,7 +60,7 @@ static uint64_t ppa2pgidx(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	uint64_t pgidx;
 
-	NVMEV_DEBUG_VERBOSE("%s: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
+	NVMEV_INFO("%s: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
 			ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
 
 	if (conv_ftl->slc_mode == SLC_MODE) {
@@ -78,7 +78,7 @@ static uint64_t ppa2pgidx(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	}
 	
 	NVMEV_ASSERT(pgidx < spp->tt_pgs);
-
+	NVMEV_INFO("pgidx: %llu", pgidx);
 	return pgidx;
 }
 
@@ -104,6 +104,7 @@ static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
 
 static inline pqueue_pri_t victim_line_get_pri(void *a)
 {
+
 	return ((struct line *)a)->vpc;
 }
 
@@ -201,7 +202,7 @@ static void init_lines(struct conv_ftl *conv_ftl)
 		INIT_LIST_HEAD(&slm->full_line_list);
 		INIT_LIST_HEAD(&slm->free_line_list);
 
-		slm->victim_line_pq = pqueue_init(slm->tt_lines, victim_line_cmp_pri, victim_line_get_pri,
+		slm->victim_line_pq = pqueue_init(spp->tt_lines_slc, victim_line_cmp_pri, victim_line_get_pri,
 						victim_line_set_pri, victim_line_get_pos,
 						victim_line_set_pos);
 		slm->free_line_cnt = 0;
@@ -273,7 +274,7 @@ static struct line *get_next_free_line(struct conv_ftl *conv_ftl)
 
 	list_del_init(&curline->entry);
 	lm->free_line_cnt--;
-	NVMEV_DEBUG("%s: free_line_cnt %d\n", __func__, lm->free_line_cnt);
+	NVMEV_INFO("%s: free_line_cnt %d\n", __func__, lm->free_line_cnt);
 	return curline;
 }
 
@@ -381,6 +382,7 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 		NVMEV_DEBUG_VERBOSE("wpp: move line to full_line_list\n");
 	} else {
 		NVMEV_DEBUG_VERBOSE("wpp: line is moved to victim list\n");
+		NVMEV_INFO("insert1/%d, %d, %d, %lu", wpp->curline->id, wpp->curline->ipc, wpp->curline->vpc, wpp->curline->pos);
 		NVMEV_ASSERT(wpp->curline->vpc >= 0 && wpp->curline->vpc < cur_pgs_per_line);
 		/* there must be some invalid pages in this line */
 		NVMEV_ASSERT(wpp->curline->ipc > 0);
@@ -392,6 +394,11 @@ static void advance_write_pointer(struct conv_ftl *conv_ftl, uint32_t io_type)
 	}
 	/* current line is used up, pick another empty line */
 	check_addr(wpp->blk, spp->blks_per_pl);
+	if (io_type == USER_IO) {
+		conv_ftl->dyn_slc_mode = SLC_MODE;
+	} else {
+		conv_ftl->dyn_slc_mode = TLC_MODE;
+	}
 	wpp->curline = get_next_free_line(conv_ftl);
 	NVMEV_DEBUG_VERBOSE("wpp: got new clean line %d\n", wpp->curline->id);
 
@@ -606,11 +613,15 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		return false;
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (blk < conv_ftl->slm.tt_lines) {
-			if (pg < 0 || pg >= spp->pgs_per_blk_slc)
+			if (pg < 0 || pg >= spp->pgs_per_blk_slc) {
+				NVMEV_INFO("invalid ppa from SLC cache");
 				return false;
+			}
 		} else {
-			if (pg < 0 || pg >= spp->pgs_per_blk)
+			if (pg < 0 || pg >= spp->pgs_per_blk) {
+				NVMEV_INFO("invalid ppa from TLC Area");
 				return false;
+			}
 		}
 	} else {
 		if (pg < 0 || pg >= spp->pgs_per_blk)
@@ -622,7 +633,12 @@ static inline bool valid_ppa(struct conv_ftl *conv_ftl, struct ppa *ppa)
 
 static inline bool valid_lpn(struct conv_ftl *conv_ftl, uint64_t lpn)
 {
-	return (lpn < conv_ftl->ssd->sp.tt_pgs);
+	if (lpn < conv_ftl->ssd->sp.tt_pgs) {
+		return true;
+	} else {
+		NVMEV_INFO("lpn: %llu, tt_pgs: %lu", lpn, conv_ftl->ssd->sp.tt_pgs);
+		return false;
+	}
 }
 
 static inline bool mapped_ppa(struct ppa *ppa)
@@ -656,6 +672,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	struct line_mgmt *lm;
 	int cur_pgs_per_blk;
 	int cur_pgs_per_line;
+	NVMEV_ASSERT(spp->tt_lines_slc == conv_ftl->slm.tt_lines);
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (ppa->g.blk < spp->tt_lines_slc) { // this ppa is in SLC cache area
 			lm = &conv_ftl->slm;
@@ -697,6 +714,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	NVMEV_ASSERT(line->vpc > 0 && line->vpc <= cur_pgs_per_line);
 	/* Adjust the position of the victime line in the pq under over-writes */
 	if (line->pos) {
+		NVMEV_INFO("change_priority/%d, %d, %d, %lu", line->id, line->ipc, line->vpc, line->pos);
 		/* Note that line->vpc will be updated by this call */
 		pqueue_change_priority(lm->victim_line_pq, line->vpc - 1, line);
 	} else {
@@ -710,6 +728,7 @@ static void mark_page_invalid(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		if (line->vpc + line->ipc != cur_pgs_per_line)
 			NVMEV_INFO("vpc: %d, ipc: %d, total: %d", line->vpc, line->ipc, cur_pgs_per_line);
 		NVMEV_ASSERT(line->vpc + line->ipc == cur_pgs_per_line);
+		NVMEV_INFO("insert2/%d, %d, %d, %lu", line->id, line->ipc, line->vpc, line->pos);
 		pqueue_insert(lm->victim_line_pq, line);
 		lm->victim_line_cnt++;
 	}
@@ -765,10 +784,8 @@ static void mark_block_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	int cur_pgs_per_blk;
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (ppa->g.blk < spp->tt_lines_slc) {
-			NVMEV_ASSERT(conv_ftl->dyn_slc_mode == SLC_MODE);
 			cur_pgs_per_blk = spp->pgs_per_blk_slc;
 		} else {
-			NVMEV_ASSERT(conv_ftl->dyn_slc_mode == TLC_MODE);
 			cur_pgs_per_blk = spp->pgs_per_blk;
 		}
 	} else {
@@ -816,6 +833,8 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct convparams *cpp = &conv_ftl->cp;
 	struct ppa new_ppa;
+	NVMEV_INFO("%s: old_ppa's... ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
+			old_ppa->g.ch, old_ppa->g.lun, old_ppa->g.pl, old_ppa->g.blk, old_ppa->g.pg);
 	uint64_t lpn = get_rmap_ent(conv_ftl, old_ppa);
 
 	NVMEV_ASSERT(valid_lpn(conv_ftl, lpn));
@@ -1103,6 +1122,7 @@ static void mark_line_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 {
 	struct line_mgmt *lm;
 	struct line *line = get_line(conv_ftl, ppa);
+
 	if (conv_ftl->slc_mode) {
 		if (ppa->g.blk < conv_ftl->ssd->sp.tt_lines_slc) {
 			lm = &conv_ftl->slm;
@@ -1112,6 +1132,7 @@ static void mark_line_free(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	} else {
 		lm = &conv_ftl->lm;
 	}
+
 	line->ipc = 0;
 	line->vpc = 0;
 	/* move this line to free line list */
@@ -1136,8 +1157,10 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 		victim_line = select_victim_line(conv_ftl, force);
 		cur_flashpgs_per_blk = spp->flashpgs_per_blk;
 		io_type = GC_IO;
+		conv_ftl->gc_cnt++;
 	}
-	conv_ftl->gc_cnt++;
+	
+
 	if (!victim_line) {
 		return -1;
 	}
@@ -1172,10 +1195,12 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 						GC_IO, USER_IO 나눠보내야 하는가에 대한 간단한 고찰
 						여기서 내리려는 명령은 erase 명령이다
 						어디에 대한?
-						모든 블럭에 대해서.
+						-> 모든 블럭에 대해서..
 						즉 victim line 내 모든 블럭 각각에 대한 erase 명령이다
 						이 말은 erase 명령이 어느 영역에 이루어질지 모른다는 소리다
 						따라서 io_type을 구분할 필요가 있다
+						근데 어짜피 ppa로 구분되는거 아닌가?
+						굳이인 것 같긴 하기도..
 					*/
 					if (cpp->enable_gc_delay) {
 						struct nand_cmd gce = {
@@ -1203,16 +1228,16 @@ static int do_gc(struct conv_ftl *conv_ftl, bool force)
 static void foreground_gc(struct conv_ftl *conv_ftl)
 {
 	if (should_migration_high(conv_ftl)) {
-		NVMEV_DEBUG_VERBOSE("should_migration_high passed");
 		/* perform GC here until !should_gc(conv_ftl) */
 		/* there must free line in TLC before migration */
 		if (should_gc_high(conv_ftl)) {
-			NVMEV_DEBUG_VERBOSE("should_gc_high passed");
+			NVMEV_INFO("GC occurred");
 			conv_ftl->dyn_slc_mode = TLC_MODE;
 			do_gc(conv_ftl, true);
 		}
 		if (conv_ftl->slc_mode == SLC_MODE) {
 			conv_ftl->dyn_slc_mode = SLC_MODE;
+			NVMEV_INFO("Mig occurred");
 			do_gc(conv_ftl, true);
 		}
 	}
@@ -1270,7 +1295,7 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 	NVMEV_DEBUG_VERBOSE("%s: start_lpn=%lld, len=%lld, end_lpn=%lld", __func__, start_lpn, nr_lba, end_lpn);
 	if ((end_lpn / nr_parts) >= spp->tt_pgs) {
 		NVMEV_ERROR("%s: lpn passed FTL range (start_lpn=%lld > tt_pgs=%ld)\n", __func__,
-			    start_lpn, spp->tt_pgs);
+			    end_lpn / nr_parts, spp->tt_pgs);
 		return false;
 	}
 
