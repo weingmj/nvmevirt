@@ -253,3 +253,41 @@ ssd_init_params는 _slc 붙혀서 새로 만들어야 겠는데?
 	int tt_lines_tlc;
 	int tt_lines_slc;
 /* wei edited end */
+
+실제로 할당되어야 할 영역은 3G
+내가 SLC Cache를 영역의 10%만큼 잡음으로써
+2.7 + 0.1 = 2.8G만 사용하게 됨
+따라서 실제 NVMeVirt 내 lpn은 2.8G만큼의 범위만 가짐
+tt_pgs = 183552., 3,007,315,968B
+2.8 * 1G(2^30B) = 3,006,477,107.2
+뭐 실제로는 조금 더 되긴 하나본데
+
+183,680의 start_lpn이 발생했고 이는 tt_pgs를 넘어선 값임
+따라서 오류가 나는 것은 당연하긴 하네
+그럼 어떡하지?
+
+size를 쌩으로 나눠도 되는가?
+
+(PORTION으로 나눠둔 라인) * pgs_per_line_each
+==?
+PORTION으로 기존 size를 줄이기
+tt_lines_slc = tt_lines * 10 / 100
+tt_lines_tlc = tt_lines - tt_lines_slc;
+
+
+pgs_per_line * tt_lines_tlc + pgs_per_line_slc * tt_lines_slc
+==
+(TLC 라인 당 페이지 수) * (tt_lines - tt_lines_slc) + (TLC 라인 당 페이지 수 / 3) * (tt_lines_slc) // TLC 라인 당 페이지 수는 무조건 3배수
+==
+tt_lines * (TLC 라인 당 페이지 수) - (tt_lines * SLC_PORTION / 100) * (TLC 라인 당 페이지 수 / 3) * 2
+!= ( 나중에 버그 날 듯, 해결 필요 일단 지금은 문제가 아닌데..)
+3G * 0.1 * 1/3 + 3G * 0.9
+== 3G - (3G * 10% * 2/3) 
+
+
+
+SLC's tt_lines: 102
+TLC's tt_lines: 922
+
+USER_IO 보장.
+SLC_MODE 보장.
