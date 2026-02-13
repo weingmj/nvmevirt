@@ -190,12 +190,14 @@ void ssd_init_params_slc(struct ssdparams *spp, uint64_t capacity, uint32_t npar
 
 	if (BLKS_PER_PLN > 0) {
 		/* flashpgs_per_blk depends on capacity */
+		NVMEV_INFO("capacity: %llu", capacity);
 		spp->blks_per_pl = BLKS_PER_PLN;
 		blk_size = DIV_ROUND_UP(capacity, spp->blks_per_pl * spp->pls_per_lun *
 							  spp->luns_per_ch * spp->nchs);
 	} else {
 		NVMEV_ASSERT(BLK_SIZE > 0);
 		blk_size = BLK_SIZE;
+		NVMEV_INFO("capacity: %llu", capacity);
 		spp->blks_per_pl = DIV_ROUND_UP(capacity, blk_size * spp->pls_per_lun *
 								  spp->luns_per_ch * spp->nchs);
 	}
@@ -541,7 +543,7 @@ uint64_t ssd_advance_nand(struct ssd *ssd, struct nand_cmd *ncmd)
 	switch (c) {
 	case NAND_READ:
 		/* read: perform NAND cmd first */
-		nand_stime = max(lun->next_lun_avail_time, cmd_stime);
+		nand_stime = max(lun->next_lun_avail_time, cmd_stime); // 바로 하거나 가능한 시간까지 기다렸다 하거나
 
 		if (ncmd->xfer_size == 4096) {
 			if (ENABLE_SLC_CACHE) {

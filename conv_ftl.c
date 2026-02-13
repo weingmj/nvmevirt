@@ -60,11 +60,12 @@ static uint64_t ppa2pgidx(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	uint64_t pgidx;
 
-	NVMEV_INFO("%s: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
-			ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
+	//NVMEV_INFO("%s: ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
+	//		ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk, ppa->g.pg);
 
 	if (conv_ftl->slc_mode == SLC_MODE) {
 		if (ppa->g.blk < spp->tt_lines_slc) { // in slc index
+			NVMEV_ASSERT(ppa->g.pg < spp->pgs_per_blk_slc);
 			pgidx = ppa->g.ch * spp->pgs_per_ch + ppa->g.lun * spp->pgs_per_lun +
 				ppa->g.pl * spp->pgs_per_pl + ppa->g.blk * spp->pgs_per_blk_slc + ppa->g.pg;
 		} else {
@@ -78,7 +79,6 @@ static uint64_t ppa2pgidx(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	}
 	
 	NVMEV_ASSERT(pgidx < spp->tt_pgs);
-	NVMEV_INFO("pgidx: %llu", pgidx);
 	return pgidx;
 }
 
@@ -93,6 +93,7 @@ static inline uint64_t get_rmap_ent(struct conv_ftl *conv_ftl, struct ppa *ppa)
 static inline void set_rmap_ent(struct conv_ftl *conv_ftl, uint64_t lpn, struct ppa *ppa)
 {
 	uint64_t pgidx = ppa2pgidx(conv_ftl, ppa);
+	//NVMEV_INFO("set rmap[%llu] to %llu", pgidx, lpn);
 
 	conv_ftl->rmap[pgidx] = lpn;
 }
@@ -527,7 +528,7 @@ void conv_init_namespace(struct nvmev_ns *ns, uint32_t id, uint64_t size, void *
 	uint32_t i;
 	const uint32_t nr_parts = SSD_PARTITIONS;
 
-	if (ENABLE_SLC_CACHE) {
+	if (ENABLE_SLC_CACHE == 1) {
 		ssd_init_params_slc(&spp, size, nr_parts);
 	} else {
 		ssd_init_params(&spp, size, nr_parts);
@@ -636,7 +637,7 @@ static inline bool valid_lpn(struct conv_ftl *conv_ftl, uint64_t lpn)
 	if (lpn < conv_ftl->ssd->sp.tt_pgs) {
 		return true;
 	} else {
-		NVMEV_INFO("lpn: %llu, tt_pgs: %lu", lpn, conv_ftl->ssd->sp.tt_pgs);
+		//NVMEV_INFO("lpn: %llu, tt_pgs: %lu", lpn, conv_ftl->ssd->sp.tt_pgs);
 		return false;
 	}
 }
@@ -833,10 +834,10 @@ static uint64_t gc_write_page(struct conv_ftl *conv_ftl, struct ppa *old_ppa)
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
 	struct convparams *cpp = &conv_ftl->cp;
 	struct ppa new_ppa;
-	NVMEV_INFO("%s: old_ppa's... ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
-			old_ppa->g.ch, old_ppa->g.lun, old_ppa->g.pl, old_ppa->g.blk, old_ppa->g.pg);
+	//NVMEV_INFO("%s: old_ppa's... ch:%d, lun:%d, pl:%d, blk:%d, pg:%d\n", __func__,
+	//		old_ppa->g.ch, old_ppa->g.lun, old_ppa->g.pl, old_ppa->g.blk, old_ppa->g.pg);
 	uint64_t lpn = get_rmap_ent(conv_ftl, old_ppa);
-
+	NVMEV_INFO("lpn: %llu, pgidx: %llu", lpn, ppa2pgidx(conv_ftl, old_ppa));
 	NVMEV_ASSERT(valid_lpn(conv_ftl, lpn));
 
 	new_ppa = get_new_page(conv_ftl, GC_IO);
@@ -911,7 +912,7 @@ static inline long long int calculate_cost_benefit_val(struct ssdparams *spp, co
 	}
 	return vpc * SCALER / ((ppl - vpc) * age);
 }
-
+#define CB
 static struct line *select_victim_line(struct conv_ftl *conv_ftl, bool force)
 {
 	struct ssdparams *spp = &conv_ftl->ssd->sp;
@@ -1039,6 +1040,7 @@ static void clean_one_block(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		if (pg_iter->status == PG_VALID) {
 			gc_read_page(conv_ftl, ppa);
 			/* delay the maptbl update until "write" happens */
+			NVMEV_INFO("call1");
 			gc_write_page(conv_ftl, ppa);
 			cnt++;
 		}
@@ -1079,20 +1081,6 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 	if (cnt <= 0)
 		return;
 
-	/*
-		GC_IO, USER_IO 나눠보내야 하는가에 대한 간단한 고찰
-		나눠보내야 하는가
-		그렇지 않나?
-		우리가 clean_one_flashpg를 언제 사용하지? 라고 한다면
-		migration 그리고 GC 둘 중 하나에서 사용하지
-		migration을 할 때 clean_one_flashpg의 READ는 SLC Cache에서 이루어지지
-		WRITE는 TLC에 하고
-		GC를 할 때는 당연히 READ/WRITE 둘 다 TLC 영역이고
-		여기서 gcr이 내리려는 명령은 "cnt 개수의 valid page만큼 읽어라" 니까,
-		migration에서는 "SLC Cache 내의 valid page"를 읽으라는 소리가 되겠지
-		즉 GC_IO, USER_IO를 구분하는게 맞다
-	*/
-
 	if (cpp->enable_gc_delay) {
 		struct nand_cmd gcr = {
 			.type = io_type,
@@ -1111,6 +1099,7 @@ static void clean_one_flashpg(struct conv_ftl *conv_ftl, struct ppa *ppa)
 		/* there shouldn't be any free page in victim blocks */
 		if (pg_iter->status == PG_VALID) {
 			/* delay the maptbl update until "write" happens */
+			// 여기서 지금 오류가 나고 있어
 			gc_write_page(conv_ftl, &ppa_copy); // ppa_copy는 기존 ppa 주소
 		}
 
@@ -1351,7 +1340,7 @@ static bool conv_read(struct nvmev_ns *ns, struct nvmev_request *req, struct nvm
 			srd.xfer_size = xfer_size;
 			srd.ppa = &prev_ppa; // 읽으려는 ppa가 여기서 정해짐2
 			nsecs_completed = ssd_advance_nand(conv_ftl->ssd, &srd);
-			nsecs_latest = max(nsecs_completed, nsecs_latest);
+			nsecs_latest = max(nsecs_completed, nsecs_latest); // 결국 가장 늦는 놈 기준
 		}
 	}
 

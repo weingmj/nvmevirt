@@ -10,12 +10,12 @@ fi
 sudo fio --directory=$TARGET_PATH \
     --direct=1 \
     --ioengine=libaio \
-    --rw=randwrite \
+    --rw=write \
     --bs=4k \
     --size=2700M \
-    --io_size=30G \
+    --io_size=4G \
     --numjobs=1 \
     --norandommap=1 \
     --randrepeat=0 \
     --random_distribution=zipf:0.8 \
-    --name please
+    --name sequential
